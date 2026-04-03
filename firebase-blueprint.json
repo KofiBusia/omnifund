@@ -1,0 +1,71 @@
+{
+  "entities": {
+    "investmentAccount": {
+      "title": "Investment Account",
+      "description": "A specific investment product or fund account.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "Name of the account." },
+        "ticker": { "type": "string", "description": "Account ticker symbol." },
+        "description": { "type": "string", "description": "Purpose of the account." },
+        "aum": { "type": "number", "description": "Total Assets Under Management for this account." },
+        "nav": { "type": "number", "description": "Net Asset Value per unit for this account." },
+        "totalUnits": { "type": "number", "description": "Total units outstanding for this account." },
+        "lastValuationDate": { "type": "string", "format": "date-time", "description": "Timestamp of the last NAV calculation." },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "ticker", "aum", "nav", "totalUnits"]
+    },
+    "investor": {
+      "title": "Investor",
+      "description": "Investor profile and holdings.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "Firebase Auth UID." },
+        "accountId": { "type": "string", "description": "Reference to the investment account." },
+        "name": { "type": "string", "description": "Full name of the investor." },
+        "email": { "type": "string", "format": "email", "description": "Contact email." },
+        "unitsOwned": { "type": "number", "description": "Total units held by the investor." },
+        "totalInvestment": { "type": "number", "description": "Total amount invested (cost basis)." },
+        "currentValue": { "type": "number", "description": "Current market value of holdings." }
+      },
+      "required": ["uid", "accountId", "name", "email", "unitsOwned"]
+    },
+    "transaction": {
+      "title": "Transaction",
+      "description": "Record of a buy or sell order.",
+      "type": "object",
+      "properties": {
+        "investorId": { "type": "string", "description": "Reference to the investor document ID." },
+        "accountId": { "type": "string", "description": "Reference to the investment account." },
+        "type": { "type": "string", "enum": ["BUY", "SELL"], "description": "Type of transaction." },
+        "units": { "type": "number", "description": "Number of units transacted." },
+        "pricePerUnit": { "type": "number", "description": "NAV at the time of transaction." },
+        "totalAmount": { "type": "number", "description": "Total monetary value of the transaction." },
+        "timestamp": { "type": "string", "format": "date-time", "description": "Transaction timestamp." }
+      },
+      "required": ["investorId", "accountId", "type", "units", "pricePerUnit", "totalAmount", "timestamp"]
+    },
+    "asset": {
+      "title": "Portfolio Asset",
+      "description": "An individual security held within an account's portfolio.",
+      "type": "object",
+      "properties": {
+        "accountId": { "type": "string", "description": "Reference to the investment account." },
+        "ticker": { "type": "string", "description": "Security ticker." },
+        "name": { "type": "string", "description": "Full name of the security." },
+        "quantity": { "type": "number", "description": "Number of shares/units held." },
+        "costBasis": { "type": "number", "description": "Average purchase price." },
+        "currentPrice": { "type": "number", "description": "Current market price per unit." },
+        "marketValue": { "type": "number", "description": "Total current market value." }
+      },
+      "required": ["accountId", "ticker", "name", "quantity", "costBasis", "currentPrice"]
+    }
+  },
+  "firestore": {
+    "/accounts/{accountId}": { "schema": "investmentAccount", "description": "Investment accounts/products." },
+    "/investors/{investorId}": { "schema": "investor", "description": "Investor records." },
+    "/transactions/{transactionId}": { "schema": "transaction", "description": "Historical transactions." },
+    "/portfolio/{assetId}": { "schema": "asset", "description": "Assets held by accounts." }
+  }
+}

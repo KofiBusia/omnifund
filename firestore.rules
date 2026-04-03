@@ -1,0 +1,77 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    // Collection: funds
+    // Fields: name, ticker, aum, nav, totalUnits, lastValuationDate
+    //
+    // Collection: investors
+    // Fields: uid, name, email, unitsOwned, totalInvestment, currentValue
+    //
+    // Collection: transactions
+    // Fields: investorId, type, units, pricePerUnit, totalAmount, timestamp
+    //
+    // Collection: portfolio
+    // Fields: ticker, name, quantity, costBasis, currentPrice, marketValue
+    // ===============================================================
+
+    // Helper Functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && 
+        (request.auth.token.email == "emmanuelagbanyo8@gmail.com" ||
+         (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin'));
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // Account Rules: Only Admins can modify account data. Everyone authenticated can read.
+    match /accounts/{accountId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin();
+    }
+
+    // Investor Rules: Admins can manage all. Investors can read their own.
+    match /investors/{investorId} {
+      allow read: if isAuthenticated() && (isAdmin() || resource.data.uid == request.auth.uid);
+      allow create: if isAuthenticated() && (isAdmin() || request.resource.data.uid == request.auth.uid);
+      allow update: if isAuthenticated() && (isAdmin() || resource.data.uid == request.auth.uid);
+      allow delete: if isAdmin();
+    }
+
+    // Transaction Rules: Admins can manage all. Investors can read their own.
+    match /transactions/{transactionId} {
+      allow read: if isAuthenticated() && (isAdmin() || get(/databases/$(database)/documents/investors/$(resource.data.investorId)).data.uid == request.auth.uid);
+      allow create: if isAuthenticated();
+      allow update, delete: if isAdmin();
+    }
+
+    // Portfolio Rules: Only Admins can modify.
+    match /portfolio/{assetId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin();
+    }
+
+    // Valuation Rules
+    match /valuations/{valuationId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin();
+    }
+
+    // User Roles (Internal)
+    match /users/{userId} {
+      allow read: if isAuthenticated() && (isOwner(userId) || isAdmin());
+      allow create: if isAuthenticated() && isOwner(userId) && 
+                   (request.resource.data.role == 'investor' || request.auth.token.email == "emmanuelagbanyo8@gmail.com");
+      allow update: if isAdmin();
+    }
+  }
+}
