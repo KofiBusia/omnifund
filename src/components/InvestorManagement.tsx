@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { Investor, InvestmentAccount, Transaction, Valuation } from '../types';
 import { 
   Plus, 
@@ -21,17 +21,21 @@ import {
   Loader2,
   AlertTriangle,
   Activity,
-  BarChart3
+  BarChart3,
+  Download
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { addDoc, collection, serverTimestamp, doc, updateDoc, increment, runTransaction, writeBatch } from 'firebase/firestore';
 import { db } from '../firebase';
 import { handleFirestoreError, OperationType } from '../lib/utils';
+import Papa from 'papaparse';
 
 import { cn, formatCurrency } from '../lib/utils';
 import TransactionHistory from './TransactionHistory';
 import BulkTransactionModal from './BulkTransactionModal';
 import StatementModal from './StatementModal';
+import EmailInvestorModal from './EmailInvestorModal';
+import BulkEmailModal from './BulkEmailModal';
 import { 
   AreaChart, 
   Area, 
@@ -51,18 +55,68 @@ interface InvestorManagementProps {
   accounts: InvestmentAccount[];
   transactions: Transaction[];
   valuations: Valuation[];
+  initialSearchTerm?: string;
 }
 
-export default function InvestorManagement({ investors, fund, accounts, transactions, valuations }: InvestorManagementProps) {
-  const [searchTerm, setSearchTerm] = useState('');
+export default function InvestorManagement({ 
+  investors, 
+  fund, 
+  accounts, 
+  transactions, 
+  valuations,
+  initialSearchTerm = ''
+}: InvestorManagementProps) {
+  const [searchTerm, setSearchTerm] = useState(initialSearchTerm);
+
+  useEffect(() => {
+    if (initialSearchTerm) {
+      setSearchTerm(initialSearchTerm);
+    }
+  }, [initialSearchTerm]);
+  useEffect(() => {
+    checkGmailStatus();
+    
+    const handleMessage = (event: MessageEvent) => {
+      if (event.data?.type === 'GOOGLE_AUTH_SUCCESS') {
+        setIsGmailConnected(true);
+      }
+    };
+    window.addEventListener('message', handleMessage);
+    return () => window.removeEventListener('message', handleMessage);
+  }, []);
+
+  const checkGmailStatus = async () => {
+    try {
+      const res = await fetch('/api/auth/google/status');
+      const data = await res.json();
+      setIsGmailConnected(data.connected);
+    } catch (error) {
+      console.error('Failed to check Gmail status');
+    }
+  };
+
+  const handleConnectGmail = async () => {
+    try {
+      const res = await fetch('/api/auth/google/url');
+      const { url } = await res.json();
+      window.open(url, 'google_auth', 'width=600,height=700');
+    } catch (error) {
+      console.error('Failed to get auth URL');
+    }
+  };
+
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [isTransactionModalOpen, setIsTransactionModalOpen] = useState(false);
   const [isBulkModalOpen, setIsBulkModalOpen] = useState(false);
   const [isHistoryModalOpen, setIsHistoryModalOpen] = useState(false);
   const [isStatementModalOpen, setIsStatementModalOpen] = useState(false);
+  const [isEmailModalOpen, setIsEmailModalOpen] = useState(false);
+  const [isBulkEmailModalOpen, setIsBulkEmailModalOpen] = useState(false);
+  const [isGmailConnected, setIsGmailConnected] = useState(false);
   const [isBackfilling, setIsBackfilling] = useState(false);
   const [selectedInvestor, setSelectedInvestor] = useState<Investor | null>(null);
   const [selectedInvestorForStatement, setSelectedInvestorForStatement] = useState<Investor | null>(null);
+  const [selectedInvestorForEmail, setSelectedInvestorForEmail] = useState<Investor | null>(null);
   
   const [newInvestor, setNewInvestor] = useState({ 
     name: '', 
@@ -102,6 +156,33 @@ export default function InvestorManagement({ investors, fund, accounts, transact
     i.email.toLowerCase().includes(searchTerm.toLowerCase()) ||
     (i.investorId && i.investorId.toLowerCase().includes(searchTerm.toLowerCase()))
   );
+
+  const handleExportCSV = () => {
+    const exportData = filteredInvestors.map(investor => ({
+      'Investor ID': investor.investorId || 'N/A',
+      'Name': investor.name,
+      'Email': investor.email,
+      'Account ID': investor.accountId,
+      'Units Owned': investor.unitsOwned.toFixed(4),
+      'Total Investment (GHS)': investor.totalInvestment.toFixed(2),
+      'Current Value (GHS)': investor.currentValue.toFixed(2),
+      'Gain/Loss (GHS)': (investor.currentValue - investor.totalInvestment).toFixed(2),
+      'Gain/Loss (%)': investor.totalInvestment > 0 
+        ? (((investor.currentValue - investor.totalInvestment) / investor.totalInvestment) * 100).toFixed(2) + '%'
+        : '0.00%'
+    }));
+
+    const csv = Papa.unparse(exportData);
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    const url = URL.createObjectURL(blob);
+    link.setAttribute('href', url);
+    link.setAttribute('download', `OmniFund_Investors_${new Date().toISOString().split('T')[0]}.csv`);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
 
   const handleAddInvestor = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -308,6 +389,33 @@ export default function InvestorManagement({ investors, fund, accounts, transact
             </button>
           )}
           <button 
+            onClick={handleConnectGmail}
+            className={cn(
+              "flex items-center gap-2 px-4 py-3 rounded-xl font-semibold transition-all border",
+              isGmailConnected 
+                ? "bg-emerald-500/10 text-emerald-500 border-emerald-500/20" 
+                : "bg-blue-500/10 text-blue-500 border-blue-500/20 hover:bg-blue-500/20"
+            )}
+          >
+            <Mail className="w-5 h-4" />
+            {isGmailConnected ? 'Gmail Connected' : 'Connect Gmail'}
+          </button>
+          <button 
+            onClick={() => setIsBulkEmailModalOpen(true)}
+            disabled={!isGmailConnected || filteredInvestors.length === 0}
+            className="bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-white px-4 py-3 rounded-xl font-semibold flex items-center gap-2 transition-all border border-slate-700"
+          >
+            <Users className="w-5 h-5" />
+            Send to All
+          </button>
+          <button 
+            onClick={handleExportCSV}
+            className="bg-slate-800 hover:bg-slate-700 text-white px-6 py-3 rounded-xl font-semibold flex items-center gap-2 transition-all border border-slate-700"
+          >
+            <Download className="w-5 h-5" />
+            Export CSV
+          </button>
+          <button 
             onClick={() => setIsBulkModalOpen(true)}
             className="bg-slate-800 hover:bg-slate-700 text-white px-6 py-3 rounded-xl font-semibold flex items-center gap-2 transition-all border border-slate-700"
           >
@@ -431,7 +539,20 @@ export default function InvestorManagement({ investors, fund, accounts, transact
                       >
                         <BarChart3 className="w-5 h-5" />
                       </button>
-                      <button className="p-2 hover:bg-slate-700 rounded-lg text-slate-400 hover:text-white transition-colors" title="Send Email">
+                      <button 
+                        onClick={() => {
+                          setSelectedInvestorForEmail(investor);
+                          setIsEmailModalOpen(true);
+                        }}
+                        disabled={!isGmailConnected}
+                        className={cn(
+                          "p-2 rounded-lg transition-colors",
+                          isGmailConnected 
+                            ? "hover:bg-slate-700 text-slate-400 hover:text-blue-400" 
+                            : "opacity-30 cursor-not-allowed text-slate-600"
+                        )}
+                        title={isGmailConnected ? "Send Email" : "Connect Gmail to send emails"}
+                      >
                         <Mail className="w-5 h-5" />
                       </button>
                     </div>
@@ -448,6 +569,25 @@ export default function InvestorManagement({ investors, fund, accounts, transact
           </div>
         )}
       </div>
+
+      <BulkEmailModal 
+        isOpen={isBulkEmailModalOpen}
+        onClose={() => setIsBulkEmailModalOpen(false)}
+        investors={filteredInvestors}
+        accounts={accounts}
+        isGmailConnected={isGmailConnected}
+      />
+
+      <EmailInvestorModal 
+        isOpen={isEmailModalOpen}
+        onClose={() => {
+          setIsEmailModalOpen(false);
+          setSelectedInvestorForEmail(null);
+        }}
+        investor={selectedInvestorForEmail}
+        fund={accounts.find(a => a.id === selectedInvestorForEmail?.accountId) || null}
+        isGmailConnected={isGmailConnected}
+      />
 
       {/* Add Investor Modal */}
       <AnimatePresence>
@@ -852,6 +992,7 @@ export default function InvestorManagement({ investors, fund, accounts, transact
         accounts={accounts}
         transactions={transactions}
         valuations={valuations}
+        isGmailConnected={isGmailConnected}
       />
     </div>
   );

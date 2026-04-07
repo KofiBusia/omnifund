@@ -16,7 +16,9 @@ import {
   ArrowRight,
   ArrowRightLeft,
   Upload,
-  X
+  X,
+  Search,
+  Download
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { addDoc, collection, doc, updateDoc, deleteDoc, getDocs, query, where, writeBatch } from 'firebase/firestore';
@@ -24,6 +26,7 @@ import { db } from '../firebase';
 import { handleFirestoreError, OperationType } from '../lib/utils';
 import TransactionHistory from './TransactionHistory';
 import BulkTransactionModal from './BulkTransactionModal';
+import Papa from 'papaparse';
 
 interface AccountManagementProps {
   accounts: InvestmentAccount[];
@@ -47,6 +50,7 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
   const [pinInput, setPinInput] = useState("");
   const [pinError, setPinError] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [searchTerm, setSearchTerm] = useState('');
   
   const [newAccount, setNewAccount] = useState({
     name: '',
@@ -82,6 +86,38 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, 'accounts');
     }
+  };
+
+  const filteredAccounts = accounts.filter(a => 
+    a.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
+    a.ticker.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    (a.description && a.description.toLowerCase().includes(searchTerm.toLowerCase()))
+  );
+
+  const handleExportCSV = () => {
+    const exportData = filteredAccounts.map(account => ({
+      'Account Name': account.name,
+      'Ticker': account.ticker,
+      'Description': account.description || 'N/A',
+      'AUM (GHS)': account.aum.toFixed(2),
+      'NAV (GHS)': account.nav.toFixed(4),
+      'Total Units': account.totalUnits.toFixed(4),
+      'Cash Balance (GHS)': account.cashBalance.toFixed(2),
+      'Investors': investors.filter(i => i.accountId === account.id).length,
+      'Assets': portfolio.filter(p => p.accountId === account.id).length,
+      'Last Valuation': account.lastValuationDate ? new Date(account.lastValuationDate).toLocaleDateString() : 'N/A'
+    }));
+
+    const csv = Papa.unparse(exportData);
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    const url = URL.createObjectURL(blob);
+    link.setAttribute('href', url);
+    link.setAttribute('download', `OmniFund_Accounts_${new Date().toISOString().split('T')[0]}.csv`);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
   const handleDeleteAccount = async () => {
@@ -170,6 +206,13 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
         </div>
         <div className="flex items-center gap-4">
           <button 
+            onClick={handleExportCSV}
+            className="bg-slate-800 hover:bg-slate-700 text-white px-6 py-3 rounded-xl font-semibold flex items-center gap-2 transition-all border border-slate-700"
+          >
+            <Download className="w-5 h-5" />
+            Export CSV
+          </button>
+          <button 
             onClick={() => setIsBulkModalOpen(true)}
             className="bg-slate-800 hover:bg-slate-700 text-white px-6 py-3 rounded-xl font-semibold flex items-center gap-2 transition-all border border-slate-700"
           >
@@ -186,8 +229,22 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
         </div>
       </div>
 
+      {/* Search and Filters */}
+      <div className="flex items-center gap-4 bg-slate-900/50 p-2 rounded-2xl border border-slate-800">
+        <div className="relative flex-1">
+          <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-500" />
+          <input 
+            type="text" 
+            placeholder="Search accounts by name or ticker..."
+            value={searchTerm}
+            onChange={(e) => setSearchTerm(e.target.value)}
+            className="w-full bg-transparent border-none focus:ring-0 pl-12 pr-4 py-3 text-slate-200 placeholder:text-slate-600"
+          />
+        </div>
+      </div>
+
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {accounts.map((account) => {
+        {filteredAccounts.map((account) => {
           const accountInvestors = investors.filter(i => i.accountId === account.id);
           const accountPortfolio = portfolio.filter(p => p.accountId === account.id);
           

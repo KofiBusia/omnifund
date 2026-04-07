@@ -1,8 +1,9 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Investor, InvestmentAccount, Transaction, Valuation } from '../types';
-import { FileText, Search, Download, Calendar, User, TrendingUp, CheckCircle2 } from 'lucide-react';
+import { FileText, Search, Download, Calendar, User, TrendingUp, CheckCircle2, Mail } from 'lucide-react';
 import { motion } from 'motion/react';
 import StatementModal from './StatementModal';
+import { cn } from '../lib/utils';
 
 interface StatementModuleProps {
   investors: Investor[];
@@ -15,6 +16,39 @@ export default function StatementModule({ investors, accounts, transactions, val
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedInvestor, setSelectedInvestor] = useState<Investor | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isGmailConnected, setIsGmailConnected] = useState(false);
+
+  useEffect(() => {
+    checkGmailStatus();
+    
+    const handleMessage = (event: MessageEvent) => {
+      if (event.data?.type === 'GOOGLE_AUTH_SUCCESS') {
+        setIsGmailConnected(true);
+      }
+    };
+    window.addEventListener('message', handleMessage);
+    return () => window.removeEventListener('message', handleMessage);
+  }, []);
+
+  const checkGmailStatus = async () => {
+    try {
+      const res = await fetch('/api/auth/google/status');
+      const data = await res.json();
+      setIsGmailConnected(data.connected);
+    } catch (error) {
+      console.error('Failed to check Gmail status');
+    }
+  };
+
+  const handleConnectGmail = async () => {
+    try {
+      const res = await fetch('/api/auth/google/url');
+      const { url } = await res.json();
+      window.open(url, 'google_auth', 'width=600,height=700');
+    } catch (error) {
+      console.error('Failed to get auth URL');
+    }
+  };
 
   const filteredInvestors = investors.filter(i => 
     i.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
@@ -23,9 +57,23 @@ export default function StatementModule({ investors, accounts, transactions, val
 
   return (
     <div className="space-y-8">
-      <div>
-        <h2 className="text-3xl font-bold text-white">Investor Statements</h2>
-        <p className="text-slate-400 mt-1">Generate and download formal investment reports</p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-3xl font-bold text-white">Investor Statements</h2>
+          <p className="text-slate-400 mt-1">Generate and download formal investment reports</p>
+        </div>
+        <button 
+          onClick={handleConnectGmail}
+          className={cn(
+            "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-bold transition-all border",
+            isGmailConnected 
+              ? "bg-emerald-500/10 text-emerald-500 border-emerald-500/20" 
+              : "bg-blue-500/10 text-blue-500 border-blue-500/20 hover:bg-blue-500/20"
+          )}
+        >
+          <Mail className="w-4 h-4" />
+          {isGmailConnected ? 'Gmail Connected' : 'Connect Gmail'}
+        </button>
       </div>
 
       <div className="bg-slate-900 border border-slate-800 rounded-2xl p-8">
@@ -119,6 +167,7 @@ export default function StatementModule({ investors, accounts, transactions, val
         accounts={accounts}
         transactions={transactions}
         valuations={valuations}
+        isGmailConnected={isGmailConnected}
       />
     </div>
   );

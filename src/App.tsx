@@ -46,6 +46,7 @@ import PortfolioManagement from './components/PortfolioManagement';
 import ValuationEngine from './components/ValuationEngine';
 import GeminiAssistant from './components/GeminiAssistant';
 import StatementModule from './components/StatementModule';
+import GlobalSearch from './components/GlobalSearch';
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
@@ -54,6 +55,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [isAssistantOpen, setIsAssistantOpen] = useState(false);
+  const [globalSearchTerm, setGlobalSearchTerm] = useState('');
 
   // Global Data State
   const [accounts, setAccounts] = useState<InvestmentAccount[]>([]);
@@ -260,6 +262,21 @@ export default function App() {
               {isSidebarOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
             </button>
 
+            <GlobalSearch 
+              investors={investors}
+              accounts={accounts}
+              transactions={transactions}
+              onSelectInvestor={(investor) => {
+                setGlobalSearchTerm(investor.name);
+                setActiveTab('investors');
+              }}
+              onSelectAccount={(account) => {
+                setSelectedAccountId(account.id);
+                setActiveTab('accounts');
+              }}
+              onSelectTab={setActiveTab}
+            />
+
             {accounts.length > 1 && (
               <select 
                 value={selectedAccountId || ''} 
@@ -311,6 +328,7 @@ export default function App() {
                   accounts={accounts} 
                   transactions={transactions} 
                   valuations={valuations}
+                  initialSearchTerm={globalSearchTerm}
                 />
               )}
               {activeTab === 'portfolio' && <PortfolioManagement portfolio={portfolio} fund={activeAccount} accounts={accounts} />}

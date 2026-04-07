@@ -8,9 +8,11 @@ import {
   ArrowDownRight, 
   Calendar, 
   ArrowUpDown,
-  X
+  X,
+  Download
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import Papa from 'papaparse';
 
 interface TransactionHistoryProps {
   transactions: Transaction[];
@@ -96,6 +98,35 @@ export default function TransactionHistory({
     return result;
   }, [transactions, searchTerm, typeFilter, accountFilter, dateRange, sortField, sortOrder, investors, accounts, filterByAccountId, filterByInvestorId]);
 
+  const handleExportCSV = () => {
+    const exportData = filteredAndSortedTransactions.map(t => {
+      const investor = investors.find(i => i.id === t.investorId);
+      const account = accounts.find(a => a.id === t.accountId);
+      return {
+        'Date': new Date(t.timestamp).toLocaleDateString(),
+        'Time': new Date(t.timestamp).toLocaleTimeString(),
+        'Investor': investor?.name || 'N/A',
+        'Account': account?.name || 'N/A',
+        'Type': t.type,
+        'Units': t.units.toFixed(4),
+        'Price per Unit (GHS)': t.pricePerUnit.toFixed(4),
+        'Total Amount (GHS)': t.totalAmount.toFixed(2),
+        'Transaction ID': t.id
+      };
+    });
+
+    const csv = Papa.unparse(exportData);
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    const url = URL.createObjectURL(blob);
+    link.setAttribute('href', url);
+    link.setAttribute('download', `OmniFund_Transactions_${new Date().toISOString().split('T')[0]}.csv`);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
   const toggleSort = (field: SortField) => {
     if (sortField === field) {
       setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc');
@@ -126,6 +157,14 @@ export default function TransactionHistory({
               className="w-full bg-slate-900 border border-slate-800 rounded-lg pl-10 pr-4 py-2 text-sm text-slate-200 focus:ring-1 focus:ring-emerald-500 outline-none"
             />
           </div>
+          <button 
+            onClick={handleExportCSV}
+            className="p-2 bg-slate-900 border border-slate-800 rounded-lg text-slate-400 hover:text-white transition-all flex items-center gap-2 text-sm font-medium"
+            title="Export CSV"
+          >
+            <Download className="w-4 h-4" />
+            <span className="hidden sm:inline">Export</span>
+          </button>
           <button 
             onClick={() => setIsFilterOpen(!isFilterOpen)}
             className={cn(

@@ -14,6 +14,7 @@ interface StatementModalProps {
   accounts: InvestmentAccount[];
   transactions: Transaction[];
   valuations: Valuation[];
+  isGmailConnected: boolean;
 }
 
 export default function StatementModal({ 
@@ -23,7 +24,8 @@ export default function StatementModal({
   fund, 
   accounts, 
   transactions, 
-  valuations 
+  valuations,
+  isGmailConnected
 }: StatementModalProps) {
   const [startDate, setStartDate] = useState(
     new Date(new Date().setMonth(new Date().getMonth() - 1)).toISOString().split('T')[0]
@@ -52,122 +54,145 @@ export default function StatementModal({
       })
       .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
 
-    // Calculate Opening Balance
-    const transactionsBefore = transactions
-      .filter(t => t.investorId === investor.id)
-      .filter(t => new Date(t.timestamp) < start);
+    // Calculate Totals
+    const allInvestorTransactions = transactions.filter(t => t.investorId === investor.id);
+    const totalPurchaseAmount = allInvestorTransactions
+      .filter(t => t.type === 'BUY')
+      .reduce((acc, t) => acc + t.totalAmount, 0);
     
-    const openingUnits = transactionsBefore.reduce((acc, t) => 
-      t.type === 'BUY' ? acc + t.units : acc - t.units, 0
-    );
+    const totalRedemptionAmount = allInvestorTransactions
+      .filter(t => t.type === 'SELL')
+      .reduce((acc, t) => acc + t.totalAmount, 0);
 
-    const openingValuations = valuations
-      .filter(v => v.accountId === investor.accountId)
-      .filter(v => {
-        const vDate = v.date?.seconds ? new Date(v.date.seconds * 1000) : new Date(v.date);
-        return vDate < start;
-      })
-      .sort((a, b) => {
-        const dateA = a.date?.seconds ? a.date.seconds * 1000 : new Date(a.date).getTime();
-        const dateB = b.date?.seconds ? b.date.seconds * 1000 : new Date(b.date).getTime();
-        return dateB - dateA;
-      });
-    
-    const openingNav = openingValuations.length > 0 ? openingValuations[0].nav : 1.0;
-    const openingValue = openingUnits * openingNav;
+    const netInvestment = totalPurchaseAmount - totalRedemptionAmount;
 
     // Calculate Closing Balance
-    const closingUnits = openingUnits + periodTransactions.reduce((acc, t) => 
-      t.type === 'BUY' ? acc + t.units : acc - t.units, 0
-    );
-
-    const closingValuations = valuations
-      .filter(v => v.accountId === investor.accountId)
-      .filter(v => {
-        const vDate = v.date?.seconds ? new Date(v.date.seconds * 1000) : new Date(v.date);
-        return vDate <= end;
-      })
-      .sort((a, b) => {
-        const dateA = a.date?.seconds ? a.date.seconds * 1000 : new Date(a.date).getTime();
-        const dateB = b.date?.seconds ? b.date.seconds * 1000 : new Date(b.date).getTime();
-        return dateB - dateA;
-      });
-    
-    const closingNav = closingValuations.length > 0 ? closingValuations[0].nav : fund.nav;
+    const closingUnits = investor.unitsOwned;
+    const closingNav = fund.nav;
     const closingValue = closingUnits * closingNav;
 
-    // PDF Content
-    doc.setFontSize(22);
-    doc.setTextColor(16, 185, 129); // Emerald 500
-    doc.text('OmniFund', 20, 20);
+    // YTD Calculation (Simple version: (Current Value - Net Investment) / Net Investment)
+    const ytdPct = netInvestment > 0 ? ((closingValue - netInvestment) / netInvestment) * 100 : 0;
+
+    // --- PDF HEADER ---
+    // Fund Name
+    doc.setFontSize(14);
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(0, 0, 0);
+    doc.text(fund.name.toUpperCase(), 20, 25);
     
-    doc.setFontSize(10);
-    doc.setTextColor(100, 116, 139); // Slate 500
-    doc.text('Investment Statement', 20, 28);
-    doc.text(`Period: ${start.toLocaleDateString()} - ${end.toLocaleDateString()}`, 20, 34);
-
-    // Investor Info
+    // "Statement" text
     doc.setFontSize(12);
-    doc.setTextColor(15, 23, 42); // Slate 900
-    doc.text('INVESTOR INFORMATION', 20, 50);
+    doc.text('Statement', 20, 35);
+
+    // Mock Logo (UMB style)
+    // Yellow box
+    doc.setFillColor(224, 170, 20); // Gold/Yellow
+    doc.rect(130, 15, 25, 15, 'F');
+    // "umb" text in white
+    doc.setTextColor(255, 255, 255);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(18);
+    doc.text('umb', 132, 26);
+
+    // Black box
+    doc.setFillColor(30, 30, 30); // Black
+    doc.rect(155, 15, 35, 15, 'F');
+    // "stockbrokers" text in white
+    doc.setTextColor(255, 255, 255);
+    doc.setFont('helvetica', 'normal');
     doc.setFontSize(10);
-    doc.text(`Name: ${investor.name}`, 20, 58);
-    doc.text(`ID: ${investor.investorId}`, 20, 64);
-    doc.text(`Email: ${investor.email}`, 20, 70);
-    doc.text(`Account: ${fund.name} (${fund.ticker})`, 20, 76);
+    doc.text('stockbrokers', 157, 25);
 
-    // Summary Table
-    autoTable(doc, {
-      startY: 90,
-      head: [['Summary Item', 'Units', 'NAV', 'Value (GHS)']],
-      body: [
-        ['Opening Balance', openingUnits.toLocaleString(), openingNav.toFixed(4), formatCurrency(openingValue).replace('GH₵', '')],
-        ['Total Subscriptions', periodTransactions.filter(t => t.type === 'BUY').reduce((acc, t) => acc + t.units, 0).toLocaleString(), '-', formatCurrency(periodTransactions.filter(t => t.type === 'BUY').reduce((acc, t) => acc + t.totalAmount, 0)).replace('GH₵', '')],
-        ['Total Redemptions', periodTransactions.filter(t => t.type === 'SELL').reduce((acc, t) => acc + t.units, 0).toLocaleString(), '-', formatCurrency(periodTransactions.filter(t => t.type === 'SELL').reduce((acc, t) => acc + t.totalAmount, 0)).replace('GH₵', '')],
-        ['Closing Balance', closingUnits.toLocaleString(), closingNav.toFixed(4), formatCurrency(closingValue).replace('GH₵', '')],
-      ],
-      theme: 'striped',
-      headStyles: { fillColor: [16, 185, 129] },
-    });
-
-    // Performance
-    const netInvestment = periodTransactions.reduce((acc, t) => t.type === 'BUY' ? acc + t.totalAmount : acc - t.totalAmount, 0);
-    const gainLoss = closingValue - (openingValue + netInvestment);
-    const gainLossPct = (openingValue + netInvestment) > 0 ? (gainLoss / (openingValue + netInvestment)) * 100 : 0;
-
-    const finalY = (doc as any).lastAutoTable.finalY;
-
-    doc.setFontSize(12);
-    doc.text('PERFORMANCE METRICS', 20, finalY + 15);
+    // --- INVESTOR INFO ---
     doc.setFontSize(10);
-    doc.text(`Net Investment in Period: ${formatCurrency(netInvestment)}`, 20, finalY + 23);
-    doc.text(`Period Gain/Loss: ${formatCurrency(gainLoss)} (${gainLossPct.toFixed(2)}%)`, 20, finalY + 29);
-
-    // Transactions Table
-    doc.setFontSize(12);
-    doc.text('TRANSACTION HISTORY', 20, finalY + 45);
+    doc.setTextColor(0, 0, 0);
     
+    const infoX = 20;
+    const infoValueX = 60;
+    let currentY = 55;
+
+    doc.text('Name', infoX, currentY);
+    doc.text(investor.name, infoValueX, currentY);
+    currentY += 7;
+
+    doc.text('Account Number', infoX, currentY);
+    doc.text(investor.investorId || 'N/A', infoValueX, currentY);
+    currentY += 7;
+
+    const formatDate = (date: Date) => {
+      const day = date.getDate();
+      const month = date.toLocaleString('default', { month: 'long' });
+      const suffix = (d: number) => {
+        if (d > 3 && d < 21) return 'th';
+        switch (d % 10) {
+          case 1: return "st";
+          case 2: return "nd";
+          case 3: return "rd";
+          default: return "th";
+        }
+      };
+      return `${day}${suffix(day)} ${month}`;
+    };
+
+    doc.text('Period', infoX, currentY);
+    doc.text(`${formatDate(start)} to ${formatDate(end)}`, infoValueX, currentY);
+
+    // --- TRANSACTIONS TABLE ---
     const transRows = periodTransactions.map(t => [
-      new Date(t.timestamp).toLocaleDateString(),
-      t.type,
-      t.units.toLocaleString(),
-      t.pricePerUnit.toFixed(4),
-      formatCurrency(t.totalAmount).replace('GH₵', '')
+      new Date(t.timestamp).toLocaleDateString('en-GB'),
+      t.type === 'BUY' ? 'Buy' : 'Sell',
+      `GHS ${t.totalAmount.toFixed(2)}`,
+      t.pricePerUnit.toFixed(2),
+      `GHS ${(t.units * t.pricePerUnit).toFixed(2)}`
     ]);
 
     autoTable(doc, {
-      startY: finalY + 50,
-      head: [['Date', 'Type', 'Units', 'Price', 'Amount (GHS)']],
-      body: transRows.length > 0 ? transRows : [['No transactions in this period', '-', '-', '-', '-']],
-      theme: 'grid',
-      headStyles: { fillColor: [59, 130, 246] }, // Blue 500
+      startY: 85,
+      head: [['Valuation Date', 'Transaction', 'Amount', 'Unit Price', 'Value']],
+      body: transRows.length > 0 ? transRows : [['-', 'No transactions', '-', '-', '-']],
+      theme: 'plain',
+      headStyles: { 
+        textColor: [0, 0, 0], 
+        fontStyle: 'bold',
+        cellPadding: 2,
+        lineWidth: { bottom: 0.5 },
+        lineColor: [0, 0, 0]
+      },
+      bodyStyles: { 
+        textColor: [0, 0, 0],
+        cellPadding: 2
+      },
+      columnStyles: {
+        0: { cellWidth: 30 },
+        1: { cellWidth: 30 },
+        2: { cellWidth: 40 },
+        3: { cellWidth: 30 },
+        4: { cellWidth: 40 },
+      },
+      margin: { left: 20, right: 20 }
     });
 
-    // Footer
-    doc.setFontSize(8);
-    doc.setTextColor(148, 163, 184);
-    doc.text('This is a computer-generated document. No signature required.', 20, 285);
-    doc.text(`Generated on ${new Date().toLocaleString()}`, 140, 285);
+    // --- SUMMARY SECTION ---
+    const summaryY = (doc as any).lastAutoTable.finalY + 20;
+    doc.setFontSize(10);
+    
+    const summaryLabelX = 20;
+    const summaryValueX = 120;
+    let sY = summaryY;
+
+    const drawSummaryLine = (label: string, value: string, isCurrency: boolean = false) => {
+      doc.text(label, summaryLabelX, sY);
+      const displayValue = isCurrency ? `GHS ${value}` : value;
+      doc.text(displayValue, summaryValueX, sY, { align: 'right' });
+      sY += 8;
+    };
+
+    drawSummaryLine('Total Number Of Units', closingUnits.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+    drawSummaryLine('Total purchase Amount', totalPurchaseAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }), true);
+    drawSummaryLine('Unit Price', closingNav.toFixed(4), true);
+    drawSummaryLine('Current Value', closingValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }), true);
+    drawSummaryLine('Year To Date(%)', ytdPct.toFixed(2));
 
     return doc;
   };
@@ -208,7 +233,8 @@ export default function StatementModal({
             investorName: investor.name,
             pdfBase64,
             startDate,
-            endDate
+            endDate,
+            fundName: fund?.name
           })
         });
 
@@ -351,13 +377,15 @@ export default function StatementModal({
 
                 <button 
                   onClick={handleSendEmail}
-                  disabled={emailStatus === 'sending' || isGenerating || isSuccess}
+                  disabled={emailStatus === 'sending' || isGenerating || isSuccess || !isGmailConnected}
                   className={cn(
                     "w-full py-4 rounded-2xl font-bold flex items-center justify-center gap-2 transition-all shadow-lg",
-                    emailStatus === 'success' ? "bg-blue-500 text-white" :
+                    emailStatus === 'success' ? "bg-emerald-500 text-white" :
                     emailStatus === 'error' ? "bg-red-500 text-white" :
+                    !isGmailConnected ? "bg-slate-800/50 text-slate-600 cursor-not-allowed border border-slate-800" :
                     "bg-slate-800 hover:bg-slate-700 text-white border border-slate-700"
                   )}
+                  title={!isGmailConnected ? "Connect Gmail first" : ""}
                 >
                   {emailStatus === 'sending' ? (
                     <>
@@ -373,6 +401,11 @@ export default function StatementModal({
                     <>
                       <AlertCircle className="w-5 h-5" />
                       Error
+                    </>
+                  ) : !isGmailConnected ? (
+                    <>
+                      <Mail className="w-5 h-5" />
+                      Connect Gmail
                     </>
                   ) : (
                     <>

@@ -15,6 +15,7 @@ import Papa from 'papaparse';
 import { db } from '../firebase';
 import { collection, doc, increment, runTransaction, getDocs, query, where } from 'firebase/firestore';
 import { handleFirestoreError, OperationType, cn, formatCurrency } from '../lib/utils';
+import { processTransactionDocument, ExtractedTransaction } from '../services/geminiService';
 
 interface BulkTransactionModalProps {
   isOpen: boolean;
@@ -27,6 +28,7 @@ interface BulkRow {
   name: string;
   type: 'BUY' | 'SELL';
   amount: number;
+  email?: string;
 }
 
 interface ProcessedRow extends BulkRow {
@@ -40,6 +42,7 @@ export default function BulkTransactionModal({ isOpen, onClose, investors, accou
   const [processedRows, setProcessedRows] = useState<ProcessedRow[]>([]);
   const [selectedAccountId, setSelectedAccountId] = useState<string>(accounts[0]?.id || '');
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isSmartProcessing, setIsSmartProcessing] = useState(false);
   const [progress, setProgress] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -62,46 +65,85 @@ export default function BulkTransactionModal({ isOpen, onClose, investors, accou
     URL.revokeObjectURL(url);
   };
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    Papa.parse(file, {
-      header: true,
-      skipEmptyLines: true,
-      complete: (results) => {
-        const rows = results.data as any[];
-        const validated = rows.map(row => {
-          const name = row.name?.trim();
-          const type = row.type?.trim().toUpperCase() as 'BUY' | 'SELL';
-          const amount = Number(row.amount);
+    if (file.type === 'text/csv' || file.name.endsWith('.csv')) {
+      Papa.parse(file, {
+        header: true,
+        skipEmptyLines: true,
+        complete: (results) => {
+          const rows = results.data as any[];
+          const validated = rows.map(row => {
+            // Flexible header mapping
+            const name = (row['FULL NAME'] || row.name || row['Investor Name'])?.trim();
+            const typeRaw = (row.TYPE || row.type || row['Transaction Type'])?.trim().toUpperCase();
+            const type = (typeRaw === 'BUY' || typeRaw === 'SELL') ? typeRaw : 'BUY';
+            const amount = Number(row['CONTRIBUTION AMOUNT'] || row.amount || row.Amount);
+            const email = (row['Email Address'] || row.email)?.trim();
 
-          const investor = investors.find(i => i.name.toLowerCase() === name?.toLowerCase());
-          const isNew = !investor;
-
-          let error = '';
-          if (!name) error = 'Name is required';
-          else if (isNaN(amount) || amount <= 0) error = 'Invalid amount';
-          else if (type !== 'BUY' && type !== 'SELL') error = 'Invalid type (use BUY or SELL)';
-          else if (investor && type === 'SELL') {
-            const currentNav = selectedAccount?.nav || 1.0000;
-            const unitsToSell = amount / currentNav;
-            if (investor.unitsOwned < unitsToSell) error = 'Insufficient units';
-          }
-
-          return {
-            name,
-            type,
-            amount,
-            investor,
-            isNew,
-            error,
-            status: error ? 'invalid' : 'valid'
-          } as ProcessedRow;
-        });
+            return validateRow({ name, type, amount, email });
+          });
+          setProcessedRows(validated);
+        }
+      });
+    } else {
+      // Smart Processing for PDF/Images
+      setIsSmartProcessing(true);
+      try {
+        const base64 = await fileToBase64(file);
+        const extracted = await processTransactionDocument(base64, file.type);
+        
+        const validated = extracted.map(row => validateRow({
+          name: row.name,
+          type: row.type,
+          amount: row.amount
+        }));
+        
         setProcessedRows(validated);
+      } catch (error) {
+        console.error('Smart processing failed:', error);
+        alert('Failed to process document. Please try a CSV file or a clearer image.');
+      } finally {
+        setIsSmartProcessing(false);
       }
+    }
+  };
+
+  const fileToBase64 = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.readAsDataURL(file);
+      reader.onload = () => {
+        const base64 = (reader.result as string).split(',')[1];
+        resolve(base64);
+      };
+      reader.onerror = error => reject(error);
     });
+  };
+
+  const validateRow = (row: BulkRow): ProcessedRow => {
+    const investor = investors.find(i => i.name.toLowerCase() === row.name?.toLowerCase());
+    const isNew = !investor;
+
+    let error = '';
+    if (!row.name) error = 'Name is required';
+    else if (isNaN(row.amount) || row.amount <= 0) error = 'Invalid amount';
+    else if (row.type !== 'BUY' && row.type !== 'SELL') error = 'Invalid type (use BUY or SELL)';
+    else if (investor && row.type === 'SELL') {
+      const currentNav = selectedAccount?.nav || 1.0000;
+      const unitsToSell = row.amount / currentNav;
+      if (investor.unitsOwned < unitsToSell) error = 'Insufficient units';
+    }
+
+    return {
+      ...row,
+      investor,
+      isNew,
+      error,
+      status: error ? 'invalid' : 'valid'
+    };
   };
 
   const processTransactions = async () => {
@@ -130,12 +172,12 @@ export default function BulkTransactionModal({ isOpen, onClose, investors, accou
           if (row.isNew) {
             investorRef = doc(collection(db, 'investors'));
             investorId = `INV-${Math.floor(100000 + Math.random() * 900000)}`;
-            const placeholderEmail = `${row.name.toLowerCase().replace(/\s+/g, '.')}@fund.local`;
+            const defaultEmail = `${row.name.toLowerCase().replace(/\s+/g, '.')}@fund.local`;
             
             dbTransaction.set(investorRef, {
               investorId,
               name: row.name,
-              email: placeholderEmail,
+              email: row.email || defaultEmail,
               accountId: selectedAccount.id,
               unitsOwned: 0,
               totalInvestment: 0,
@@ -242,8 +284,17 @@ export default function BulkTransactionModal({ isOpen, onClose, investors, accou
         {processedRows.length === 0 ? (
           <div className="flex-1 flex flex-col items-center justify-center py-12 border-2 border-dashed border-slate-800 rounded-3xl bg-slate-800/20">
             <FileText className="w-16 h-16 text-slate-700 mb-4" />
+            <div className="flex items-center gap-2 mb-6">
+              <div className="bg-emerald-500/10 text-emerald-500 px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider border border-emerald-500/20">
+                Supports CSV, PDF & Images
+              </div>
+              <div className="bg-blue-500/10 text-blue-500 px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider border border-blue-500/20">
+                AI Powered Extraction
+              </div>
+            </div>
+
             <p className="text-slate-400 mb-6 text-center max-w-xs">
-              Select a CSV file containing name, type (BUY/SELL), and amount.
+              Upload a CSV, PDF, or image of a transaction receipt. Our AI will automatically extract the details.
             </p>
             
             <div className="mb-8 w-full max-w-xs">
@@ -263,16 +314,27 @@ export default function BulkTransactionModal({ isOpen, onClose, investors, accou
 
             <input 
               type="file" 
-              accept=".csv" 
+              accept=".csv, .pdf, image/*" 
               className="hidden" 
               ref={fileInputRef}
               onChange={handleFileUpload}
             />
             <button 
               onClick={() => fileInputRef.current?.click()}
-              className="bg-emerald-600 hover:bg-emerald-500 text-white px-8 py-3 rounded-xl font-bold transition-all shadow-lg shadow-emerald-600/20"
+              disabled={isSmartProcessing}
+              className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white px-8 py-3 rounded-xl font-bold transition-all shadow-lg shadow-emerald-600/20 flex items-center gap-2"
             >
-              Select CSV File
+              {isSmartProcessing ? (
+                <>
+                  <Loader2 className="w-5 h-5 animate-spin" />
+                  Analyzing Document...
+                </>
+              ) : (
+                <>
+                  <Upload className="w-5 h-5" />
+                  Select File
+                </>
+              )}
             </button>
           </div>
         ) : (
