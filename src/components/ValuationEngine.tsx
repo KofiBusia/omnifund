@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Asset, InvestmentAccount, Investor } from '../types';
+import { Asset, InvestmentAccount, Investor, Valuation } from '../types';
 import { 
   Calculator, 
   History, 
@@ -22,9 +22,10 @@ interface ValuationEngineProps {
   fund: InvestmentAccount | null;
   portfolio: Asset[];
   investors: Investor[];
+  valuations: Valuation[];
 }
 
-export default function ValuationEngine({ fund, portfolio, investors }: ValuationEngineProps) {
+export default function ValuationEngine({ fund, portfolio, investors, valuations }: ValuationEngineProps) {
   const [isCalculating, setIsCalculating] = useState(false);
   const [lastResult, setLastResult] = useState<{ nav: number; aum: number } | null>(null);
 
@@ -50,7 +51,13 @@ export default function ValuationEngine({ fund, portfolio, investors }: Valuatio
     <div className="space-y-8">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-3xl font-bold text-white">Valuation Engine</h2>
+          <div className="flex items-center gap-2 mb-1">
+            <h2 className="text-3xl font-bold text-white">Valuation Engine</h2>
+            <div className="flex items-center gap-1.5 bg-emerald-500/10 text-emerald-500 px-2 py-0.5 rounded-full border border-emerald-500/20">
+              <div className="w-1 h-1 bg-emerald-500 rounded-full animate-pulse" />
+              <span className="text-[10px] font-bold uppercase tracking-wider">Live</span>
+            </div>
+          </div>
           <p className="text-slate-400 mt-1">Calculate and publish Net Asset Value (NAV)</p>
         </div>
         <button 
@@ -130,21 +137,33 @@ export default function ValuationEngine({ fund, portfolio, investors }: Valuatio
             Recent Valuations
           </h3>
           <div className="space-y-4">
-            {[1, 2, 3, 4, 5].map((i) => (
-              <div key={i} className="p-4 bg-slate-800/30 rounded-xl border border-slate-800/50 flex items-center justify-between">
-                <div>
-                  <p className="text-xs text-slate-500">April {10 - i}, 2024</p>
-                  <p className="text-sm font-bold text-white">{formatCurrency(1.2456 - i * 0.01)}</p>
+            {valuations.length > 0 ? (
+              valuations.slice(0, 5).map((v) => (
+                <div key={v.id} className="p-4 bg-slate-800/30 rounded-xl border border-slate-800/50 flex items-center justify-between">
+                  <div>
+                    <p className="text-xs text-slate-500">
+                      {v.date?.seconds 
+                        ? new Date(v.date.seconds * 1000).toLocaleString() 
+                        : 'Just now'}
+                    </p>
+                    <p className="text-sm font-bold text-white">{formatCurrency(v.nav)}</p>
+                  </div>
+                  <div className="flex items-center gap-1 text-emerald-500 text-[10px] font-bold">
+                    <CheckCircle2 className="w-3 h-3" />
+                    VERIFIED
+                  </div>
                 </div>
-                <div className="flex items-center gap-1 text-emerald-500 text-[10px] font-bold">
-                  <CheckCircle2 className="w-3 h-3" />
-                  VERIFIED
-                </div>
+              ))
+            ) : (
+              <div className="py-10 text-center text-slate-500 text-sm">
+                No valuation history found.
               </div>
-            ))}
-            <button className="w-full py-3 text-sm text-slate-400 hover:text-white transition-colors">
-              View Full History
-            </button>
+            )}
+            {valuations.length > 5 && (
+              <button className="w-full py-3 text-sm text-slate-400 hover:text-white transition-colors">
+                View Full History
+              </button>
+            )}
           </div>
         </div>
       </div>

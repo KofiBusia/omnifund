@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { InvestmentAccount, Investor, Asset } from '../types';
+import React, { useState, useEffect } from 'react';
+import { InvestmentAccount, Investor, Asset, Transaction } from '../types';
 import { cn, formatCurrency } from '../lib/utils';
 import { 
   Plus, 
@@ -14,27 +14,35 @@ import {
   Lock,
   AlertTriangle,
   ArrowRight,
+  ArrowRightLeft,
+  Upload,
   X
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { addDoc, collection, doc, updateDoc, deleteDoc, getDocs, query, where, writeBatch } from 'firebase/firestore';
 import { db } from '../firebase';
 import { handleFirestoreError, OperationType } from '../lib/utils';
+import TransactionHistory from './TransactionHistory';
+import BulkTransactionModal from './BulkTransactionModal';
 
 interface AccountManagementProps {
   accounts: InvestmentAccount[];
   investors: Investor[];
   portfolio: Asset[];
+  transactions: Transaction[];
 }
 
 const AUTH_PIN = "1234"; // Default PIN for authorization
 
-export default function AccountManagement({ accounts, investors, portfolio }: AccountManagementProps) {
+export default function AccountManagement({ accounts, investors, portfolio, transactions }: AccountManagementProps) {
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [editingAccount, setEditingAccount] = useState<InvestmentAccount | null>(null);
   
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
+  const [isHistoryModalOpen, setIsHistoryModalOpen] = useState(false);
+  const [isBulkModalOpen, setIsBulkModalOpen] = useState(false);
+  const [selectedAccountForHistory, setSelectedAccountForHistory] = useState<InvestmentAccount | null>(null);
   const [accountToDelete, setAccountToDelete] = useState<string | null>(null);
   const [pinInput, setPinInput] = useState("");
   const [pinError, setPinError] = useState(false);
@@ -46,19 +54,31 @@ export default function AccountManagement({ accounts, investors, portfolio }: Ac
     description: '',
     aum: 0,
     nav: 1.0000,
-    totalUnits: 0
+    totalUnits: 0,
+    cashBalance: 0
   });
+
+  // Auto-calculate total units when AUM or NAV changes
+  useEffect(() => {
+    if (newAccount.nav > 0) {
+      const calculatedUnits = newAccount.aum / newAccount.nav;
+      if (newAccount.totalUnits !== calculatedUnits) {
+        setNewAccount(prev => ({ ...prev, totalUnits: calculatedUnits }));
+      }
+    }
+  }, [newAccount.aum, newAccount.nav]);
 
   const handleAddAccount = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
       await addDoc(collection(db, 'accounts'), {
         ...newAccount,
+        cashBalance: newAccount.aum, // Initial AUM is all cash
         lastValuationDate: new Date().toISOString(),
         createdAt: new Date().toISOString()
       });
       setIsAddModalOpen(false);
-      setNewAccount({ name: '', ticker: '', description: '', aum: 0, nav: 1.0000, totalUnits: 0 });
+      setNewAccount({ name: '', ticker: '', description: '', aum: 0, nav: 1.0000, totalUnits: 0, cashBalance: 0 });
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, 'accounts');
     }
@@ -148,13 +168,22 @@ export default function AccountManagement({ accounts, investors, portfolio }: Ac
           <h2 className="text-3xl font-bold text-white">Investment Accounts</h2>
           <p className="text-slate-400 mt-1">Manage fund products and investment portfolios</p>
         </div>
-        <button 
-          onClick={() => setIsAddModalOpen(true)}
-          className="bg-emerald-600 hover:bg-emerald-500 text-white px-6 py-3 rounded-xl font-semibold flex items-center gap-2 transition-all shadow-lg shadow-emerald-600/20"
-        >
-          <Plus className="w-5 h-5" />
-          Create New Account
-        </button>
+        <div className="flex items-center gap-4">
+          <button 
+            onClick={() => setIsBulkModalOpen(true)}
+            className="bg-slate-800 hover:bg-slate-700 text-white px-6 py-3 rounded-xl font-semibold flex items-center gap-2 transition-all border border-slate-700"
+          >
+            <Upload className="w-5 h-5" />
+            Bulk Transactions
+          </button>
+          <button 
+            onClick={() => setIsAddModalOpen(true)}
+            className="bg-emerald-600 hover:bg-emerald-500 text-white px-6 py-3 rounded-xl font-semibold flex items-center gap-2 transition-all shadow-lg shadow-emerald-600/20"
+          >
+            <Plus className="w-5 h-5" />
+            Create New Account
+          </button>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -225,6 +254,16 @@ export default function AccountManagement({ accounts, investors, portfolio }: Ac
                     </div>
                   </div>
                   <div className="flex items-center gap-4">
+                    <button 
+                      onClick={() => {
+                        setSelectedAccountForHistory(account);
+                        setIsHistoryModalOpen(true);
+                      }}
+                      className="p-2 hover:bg-emerald-500/10 text-slate-500 hover:text-emerald-500 rounded-lg transition-all"
+                      title="Transaction History"
+                    >
+                      <ArrowRightLeft className="w-5 h-5" />
+                    </button>
                     <button 
                       onClick={() => {
                         setAccountToDelete(account.id);
@@ -432,6 +471,17 @@ export default function AccountManagement({ accounts, investors, portfolio }: Ac
                     />
                   </div>
                 </div>
+
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-slate-400">Calculated Total Units</label>
+                  <input 
+                    readOnly
+                    type="text" 
+                    value={newAccount.totalUnits.toLocaleString(undefined, { maximumFractionDigits: 4 })}
+                    className="w-full bg-slate-800/50 border border-slate-700 rounded-xl px-4 py-3 text-slate-400 cursor-not-allowed outline-none transition-all font-mono"
+                  />
+                  <p className="text-[10px] text-slate-500 italic">Automatically calculated as AUM / NAV</p>
+                </div>
                 
                 <div className="bg-blue-500/5 border border-blue-500/20 p-4 rounded-2xl flex gap-3">
                   <Info className="w-5 h-5 text-blue-500 flex-shrink-0" />
@@ -541,6 +591,61 @@ export default function AccountManagement({ accounts, investors, portfolio }: Ac
           </div>
         )}
       </AnimatePresence>
+
+      {/* Transaction History Modal */}
+      <AnimatePresence>
+        {isHistoryModalOpen && selectedAccountForHistory && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-slate-900 border border-slate-800 rounded-3xl p-8 max-w-5xl w-full shadow-2xl max-h-[90vh] overflow-y-auto"
+            >
+              <div className="flex items-center justify-between mb-6">
+                <div>
+                  <h3 className="text-2xl font-bold text-white">Account History</h3>
+                  <p className="text-slate-400">{selectedAccountForHistory.name} ({selectedAccountForHistory.ticker})</p>
+                </div>
+                <button 
+                  onClick={() => {
+                    setIsHistoryModalOpen(false);
+                    setSelectedAccountForHistory(null);
+                  }}
+                  className="p-2 hover:bg-slate-800 rounded-xl text-slate-400 transition-colors"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <TransactionHistory 
+                transactions={transactions} 
+                accounts={accounts} 
+                investors={investors} 
+                filterByAccountId={selectedAccountForHistory.id}
+                title="Account Transactions"
+              />
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Global Transaction History */}
+      <div className="pt-8 border-t border-slate-800">
+        <TransactionHistory 
+          transactions={transactions} 
+          accounts={accounts} 
+          investors={investors} 
+          title="All Account Transactions"
+        />
+      </div>
+
+      <BulkTransactionModal 
+        isOpen={isBulkModalOpen}
+        onClose={() => setIsBulkModalOpen(false)}
+        investors={investors}
+        accounts={accounts}
+      />
     </div>
   );
 }

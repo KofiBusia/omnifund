@@ -15,7 +15,7 @@ import {
   Loader2
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { addDoc, collection, doc, updateDoc, deleteDoc } from 'firebase/firestore';
+import { addDoc, collection, doc, updateDoc, deleteDoc, runTransaction, increment } from 'firebase/firestore';
 import { db } from '../firebase';
 import { handleFirestoreError, OperationType } from '../lib/utils';
 import { runGlobalValuation } from '../services/valuationService';
@@ -69,11 +69,33 @@ export default function PortfolioManagement({ portfolio, fund, accounts }: Portf
 
   const handleAddAsset = async (e: React.FormEvent) => {
     e.preventDefault();
+    const selectedAccount = accounts.find(a => a.id === newAsset.accountId) || fund;
+    if (!selectedAccount) return;
+
+    const totalCost = newAsset.quantity * newAsset.costBasis;
+
+    if (selectedAccount.cashBalance < totalCost) {
+      alert(`Insufficient cash in fund. Available: ${formatCurrency(selectedAccount.cashBalance)}`);
+      return;
+    }
+
     try {
-      await addDoc(collection(db, 'portfolio'), {
-        ...newAsset,
-        marketValue: newAsset.quantity * newAsset.currentPrice
+      await runTransaction(db, async (transaction) => {
+        const accountRef = doc(db, 'accounts', selectedAccount.id);
+        
+        // 1. Add asset
+        const assetRef = doc(collection(db, 'portfolio'));
+        transaction.set(assetRef, {
+          ...newAsset,
+          marketValue: newAsset.quantity * newAsset.currentPrice
+        });
+
+        // 2. Deduct from cash balance
+        transaction.update(accountRef, {
+          cashBalance: increment(-totalCost)
+        });
       });
+
       setIsAddModalOpen(false);
       setNewAsset({ ...newAsset, ticker: '', name: '', quantity: 0, costBasis: 0, currentPrice: 0 });
     } catch (error) {
@@ -98,7 +120,13 @@ export default function PortfolioManagement({ portfolio, fund, accounts }: Portf
     <div className="space-y-8">
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
-          <h2 className="text-3xl font-bold text-white">Portfolio Management</h2>
+          <div className="flex items-center gap-2 mb-1">
+            <h2 className="text-3xl font-bold text-white">Portfolio Management</h2>
+            <div className="flex items-center gap-1.5 bg-emerald-500/10 text-emerald-500 px-2 py-0.5 rounded-full border border-emerald-500/20">
+              <div className="w-1 h-1 bg-emerald-500 rounded-full animate-pulse" />
+              <span className="text-[10px] font-bold uppercase tracking-wider">Live</span>
+            </div>
+          </div>
           <p className="text-slate-400 mt-1">Manage fund assets and security holdings</p>
         </div>
         <div className="flex flex-wrap items-center gap-4">

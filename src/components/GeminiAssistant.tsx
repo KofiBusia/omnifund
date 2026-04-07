@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { X, Send, Bot, User, Sparkles, Loader2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { getGeminiResponse } from '../lib/gemini';
-import { InvestmentAccount, Investor, Asset } from '../types';
+import { InvestmentAccount, Investor, Asset, Valuation } from '../types';
 
 interface GeminiAssistantProps {
   isOpen: boolean;
@@ -11,6 +11,7 @@ interface GeminiAssistantProps {
     fund: InvestmentAccount | null;
     investors: Investor[];
     portfolio: Asset[];
+    valuations: Valuation[];
   };
 }
 
@@ -49,6 +50,7 @@ export default function GeminiAssistant({ isOpen, onClose, context }: GeminiAssi
         NAV: GH₵${context.fund?.nav.toFixed(4) || '0'}
         Total Investors: ${context.investors.length}
         Portfolio Assets: ${context.portfolio.map(a => `${a.ticker} (${a.marketValue})`).join(', ')}
+        Recent Valuations: ${context.valuations.slice(0, 5).map(v => `Date: ${v.date?.seconds ? new Date(v.date.seconds * 1000).toLocaleDateString() : 'N/A'}, NAV: ${v.nav}, AUM: ${v.aum}`).join('; ')}
       `;
       
       const response = await getGeminiResponse(userMessage, contextStr);

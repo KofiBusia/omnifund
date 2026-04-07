@@ -6,12 +6,14 @@ export interface InvestmentAccount {
   aum: number;
   nav: number;
   totalUnits: number;
+  cashBalance: number;
   lastValuationDate: string;
   createdAt: string;
 }
 
 export interface Investor {
   id: string;
+  investorId: string; // Auto-generated unique ID (e.g. INV-123456)
   uid: string;
   accountId: string;
   name: string;
@@ -46,4 +48,13 @@ export interface Asset {
 export interface UserRole {
   uid: string;
   role: 'admin' | 'investor';
+}
+
+export interface Valuation {
+  id: string;
+  accountId: string;
+  date: { seconds: number; nanoseconds: number } | any;
+  nav: number;
+  aum: number;
+  notes?: string;
 }

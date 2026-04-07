@@ -33,7 +33,7 @@ import {
   serverTimestamp
 } from 'firebase/firestore';
 import { auth, db } from './firebase';
-import { InvestmentAccount, Investor, Asset, Transaction } from './types';
+import { InvestmentAccount, Investor, Asset, Transaction, Valuation } from './types';
 import { runGlobalValuation } from './services/valuationService';
 
 import { cn, handleFirestoreError, OperationType } from './lib/utils';
@@ -45,6 +45,7 @@ import InvestorManagement from './components/InvestorManagement';
 import PortfolioManagement from './components/PortfolioManagement';
 import ValuationEngine from './components/ValuationEngine';
 import GeminiAssistant from './components/GeminiAssistant';
+import StatementModule from './components/StatementModule';
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
@@ -59,6 +60,7 @@ export default function App() {
   const [investors, setInvestors] = useState<Investor[]>([]);
   const [portfolio, setPortfolio] = useState<Asset[]>([]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [valuations, setValuations] = useState<Valuation[]>([]);
 
   // Derived active account (for simplicity, use the first one if none selected)
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
@@ -110,38 +112,9 @@ export default function App() {
   useEffect(() => {
     if (!user) return;
 
-    const accountsUnsub = onSnapshot(collection(db, 'accounts'), async (snapshot) => {
-      if (snapshot.empty && role === 'admin') {
-        // Seed initial account
-        const accountRef = doc(collection(db, 'accounts'));
-        const accountId = accountRef.id;
-        await setDoc(accountRef, {
-          name: "Omni Ghana Equity Fund",
-          ticker: "OMNI-GEF",
-          description: "Primary equity fund focused on GSE growth stocks.",
-          aum: 5000000,
-          nav: 1.0000,
-          totalUnits: 5000000,
-          lastValuationDate: new Date().toISOString(),
-          createdAt: new Date().toISOString()
-        });
-        
-        // Seed initial portfolio with GSE stocks for this account
-        const assets = [
-          { accountId, ticker: 'MTNGH', name: 'Scancom PLC (MTN Ghana)', quantity: 500000, costBasis: 1.20, currentPrice: 1.55, marketValue: 775000 },
-          { accountId, ticker: 'GCB', name: 'GCB Bank PLC', quantity: 100000, costBasis: 3.50, currentPrice: 5.20, marketValue: 520000 },
-          { accountId, ticker: 'EGH', name: 'Ecobank Ghana PLC', quantity: 80000, costBasis: 4.80, currentPrice: 6.10, marketValue: 488000 },
-          { accountId, ticker: 'SCB', name: 'Standard Chartered Bank Ghana', quantity: 20000, costBasis: 12.00, currentPrice: 18.50, marketValue: 370000 },
-          { accountId, ticker: 'TOTAL', name: 'TotalEnergies Marketing Ghana', quantity: 50000, costBasis: 5.00, currentPrice: 9.50, marketValue: 475000 },
-        ];
-        
-        for (const asset of assets) {
-          await addDoc(collection(db, 'portfolio'), asset);
-        }
-      } else {
-        const data = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as InvestmentAccount));
-        setAccounts(data);
-      }
+    const accountsUnsub = onSnapshot(collection(db, 'accounts'), (snapshot) => {
+      const data = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as InvestmentAccount));
+      setAccounts(data);
     }, (error) => handleFirestoreError(error, OperationType.GET, 'accounts'));
 
     const investorsUnsub = onSnapshot(collection(db, 'investors'), (snapshot) => {
@@ -159,11 +132,17 @@ export default function App() {
       setTransactions(data);
     }, (error) => handleFirestoreError(error, OperationType.GET, 'transactions'));
 
+    const valuationsUnsub = onSnapshot(collection(db, 'valuations'), (snapshot) => {
+      const data = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as Valuation));
+      setValuations(data.sort((a, b) => (b.date?.seconds || 0) - (a.date?.seconds || 0)));
+    }, (error) => handleFirestoreError(error, OperationType.GET, 'valuations'));
+
     return () => {
       accountsUnsub();
       investorsUnsub();
       portfolioUnsub();
       transactionsUnsub();
+      valuationsUnsub();
     };
   }, [user, role]);
 
@@ -216,13 +195,15 @@ export default function App() {
   }
 
   const navItems = [
-    { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
-    { id: 'accounts', label: 'Accounts', icon: PieChart },
-    { id: 'investors', label: 'Investors', icon: Users },
-    { id: 'portfolio', label: 'Portfolio', icon: Briefcase },
-    { id: 'valuation', label: 'Valuation', icon: TrendingUp },
-    { id: 'statements', label: 'Statements', icon: FileText },
+    { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, roles: ['admin', 'investor'] },
+    { id: 'accounts', label: 'Accounts', icon: PieChart, roles: ['admin'] },
+    { id: 'investors', label: 'Investors', icon: Users, roles: ['admin'] },
+    { id: 'portfolio', label: 'Portfolio', icon: Briefcase, roles: ['admin', 'investor'] },
+    { id: 'valuation', label: 'Valuation', icon: TrendingUp, roles: ['admin'] },
+    { id: 'statements', label: 'Statements', icon: FileText, roles: ['admin', 'investor'] },
   ];
+
+  const filteredNavItems = navItems.filter(item => item.roles.includes(role || ''));
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-200 flex">
@@ -240,7 +221,7 @@ export default function App() {
         </div>
 
         <nav className="flex-1 px-4 space-y-2 mt-4">
-          {navItems.map((item) => (
+          {filteredNavItems.map((item) => (
             <button
               key={item.id}
               onClick={() => setActiveTab(item.id)}
@@ -314,12 +295,41 @@ export default function App() {
               exit={{ opacity: 0, y: -10 }}
               transition={{ duration: 0.2 }}
             >
-              {activeTab === 'dashboard' && <Dashboard fund={activeAccount} investors={investors.filter(i => i.accountId === activeAccount?.id)} portfolio={portfolio.filter(p => p.accountId === activeAccount?.id)} />}
-              {activeTab === 'accounts' && <AccountManagement accounts={accounts} investors={investors} portfolio={portfolio} />}
-              {activeTab === 'investors' && <InvestorManagement investors={investors} fund={activeAccount} accounts={accounts} />}
+              {activeTab === 'dashboard' && (
+                <Dashboard 
+                  fund={activeAccount} 
+                  investors={investors.filter(i => i.accountId === activeAccount?.id)} 
+                  portfolio={portfolio.filter(p => p.accountId === activeAccount?.id)}
+                  valuations={valuations.filter(v => v.accountId === activeAccount?.id)}
+                />
+              )}
+              {activeTab === 'accounts' && <AccountManagement accounts={accounts} investors={investors} portfolio={portfolio} transactions={transactions} />}
+              {activeTab === 'investors' && (
+                <InvestorManagement 
+                  investors={investors} 
+                  fund={activeAccount} 
+                  accounts={accounts} 
+                  transactions={transactions} 
+                  valuations={valuations}
+                />
+              )}
               {activeTab === 'portfolio' && <PortfolioManagement portfolio={portfolio} fund={activeAccount} accounts={accounts} />}
-              {activeTab === 'valuation' && <ValuationEngine fund={activeAccount} portfolio={portfolio.filter(p => p.accountId === activeAccount?.id)} investors={investors.filter(i => i.accountId === activeAccount?.id)} />}
-              {activeTab === 'statements' && <div className="text-center py-20 text-slate-500">Statement generation module loading...</div>}
+              {activeTab === 'valuation' && (
+                <ValuationEngine 
+                  fund={activeAccount} 
+                  portfolio={portfolio.filter(p => p.accountId === activeAccount?.id)} 
+                  investors={investors.filter(i => i.accountId === activeAccount?.id)} 
+                  valuations={valuations.filter(v => v.accountId === activeAccount?.id)}
+                />
+              )}
+              {activeTab === 'statements' && (
+                <StatementModule 
+                  investors={investors} 
+                  accounts={accounts} 
+                  transactions={transactions} 
+                  valuations={valuations} 
+                />
+              )}
             </motion.div>
           </AnimatePresence>
         </div>
@@ -336,7 +346,7 @@ export default function App() {
       <GeminiAssistant 
         isOpen={isAssistantOpen} 
         onClose={() => setIsAssistantOpen(false)} 
-        context={{ fund: activeAccount, investors, portfolio }}
+        context={{ fund: activeAccount, investors, portfolio, valuations }}
       />
     </div>
   );

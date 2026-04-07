@@ -43,7 +43,8 @@ export const runGlobalValuation = async () => {
 
     // 6. Update accounts
     for (const account of accounts) {
-      const totalMarketValue = accountTotals[account.id] || 0;
+      const totalHoldingsValue = accountTotals[account.id] || 0;
+      const totalMarketValue = totalHoldingsValue + (account.cashBalance || 0);
       const calculatedNAV = account.totalUnits > 0 ? totalMarketValue / account.totalUnits : account.nav;
 
       await updateDoc(doc(db, 'accounts', account.id), {
