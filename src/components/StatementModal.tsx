@@ -3,8 +3,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { X, Calendar, Download, Loader2, FileText, CheckCircle2, Mail, Send, AlertCircle } from 'lucide-react';
 import { Investor, InvestmentAccount, Transaction, Valuation } from '../types';
 import { formatCurrency, cn } from '../lib/utils';
-import { jsPDF } from 'jspdf';
-import autoTable from 'jspdf-autotable';
+import { generateStatementPDF } from '../lib/pdfGenerator';
 
 interface StatementModalProps {
   isOpen: boolean;
@@ -31,177 +30,18 @@ export default function StatementModal({
     new Date(new Date().setMonth(new Date().getMonth() - 1)).toISOString().split('T')[0]
   );
   const [endDate, setEndDate] = useState(new Date().toISOString().split('T')[0]);
+
   const [isGenerating, setIsGenerating] = useState(false);
   const [isEmailing, setIsEmailing] = useState(false);
   const [isSuccess, setIsSuccess] = useState(false);
   const [emailStatus, setEmailStatus] = useState<'idle' | 'sending' | 'success' | 'error'>('idle');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  const generatePDFData = async () => {
-    if (!investor || !fund) return null;
-
-    const doc = new jsPDF() as any;
-    const start = new Date(startDate);
-    const end = new Date(endDate);
-    end.setHours(23, 59, 59, 999);
-
-    // Filter data for the period
-    const periodTransactions = transactions
-      .filter(t => t.investorId === investor.id)
-      .filter(t => {
-        const tDate = new Date(t.timestamp);
-        return tDate >= start && tDate <= end;
-      })
-      .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
-
-    // Calculate Totals
-    const allInvestorTransactions = transactions.filter(t => t.investorId === investor.id);
-    const totalPurchaseAmount = allInvestorTransactions
-      .filter(t => t.type === 'BUY')
-      .reduce((acc, t) => acc + t.totalAmount, 0);
-    
-    const totalRedemptionAmount = allInvestorTransactions
-      .filter(t => t.type === 'SELL')
-      .reduce((acc, t) => acc + t.totalAmount, 0);
-
-    const netInvestment = totalPurchaseAmount - totalRedemptionAmount;
-
-    // Calculate Closing Balance
-    const closingUnits = investor.unitsOwned;
-    const closingNav = fund.nav;
-    const closingValue = closingUnits * closingNav;
-
-    // YTD Calculation (Simple version: (Current Value - Net Investment) / Net Investment)
-    const ytdPct = netInvestment > 0 ? ((closingValue - netInvestment) / netInvestment) * 100 : 0;
-
-    // --- PDF HEADER ---
-    // Fund Name
-    doc.setFontSize(14);
-    doc.setFont('helvetica', 'bold');
-    doc.setTextColor(0, 0, 0);
-    doc.text(fund.name.toUpperCase(), 20, 25);
-    
-    // "Statement" text
-    doc.setFontSize(12);
-    doc.text('Statement', 20, 35);
-
-    // Mock Logo (UMB style)
-    // Yellow box
-    doc.setFillColor(224, 170, 20); // Gold/Yellow
-    doc.rect(130, 15, 25, 15, 'F');
-    // "umb" text in white
-    doc.setTextColor(255, 255, 255);
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(18);
-    doc.text('umb', 132, 26);
-
-    // Black box
-    doc.setFillColor(30, 30, 30); // Black
-    doc.rect(155, 15, 35, 15, 'F');
-    // "stockbrokers" text in white
-    doc.setTextColor(255, 255, 255);
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(10);
-    doc.text('stockbrokers', 157, 25);
-
-    // --- INVESTOR INFO ---
-    doc.setFontSize(10);
-    doc.setTextColor(0, 0, 0);
-    
-    const infoX = 20;
-    const infoValueX = 60;
-    let currentY = 55;
-
-    doc.text('Name', infoX, currentY);
-    doc.text(investor.name, infoValueX, currentY);
-    currentY += 7;
-
-    doc.text('Account Number', infoX, currentY);
-    doc.text(investor.investorId || 'N/A', infoValueX, currentY);
-    currentY += 7;
-
-    const formatDate = (date: Date) => {
-      const day = date.getDate();
-      const month = date.toLocaleString('default', { month: 'long' });
-      const suffix = (d: number) => {
-        if (d > 3 && d < 21) return 'th';
-        switch (d % 10) {
-          case 1: return "st";
-          case 2: return "nd";
-          case 3: return "rd";
-          default: return "th";
-        }
-      };
-      return `${day}${suffix(day)} ${month}`;
-    };
-
-    doc.text('Period', infoX, currentY);
-    doc.text(`${formatDate(start)} to ${formatDate(end)}`, infoValueX, currentY);
-
-    // --- TRANSACTIONS TABLE ---
-    const transRows = periodTransactions.map(t => [
-      new Date(t.timestamp).toLocaleDateString('en-GB'),
-      t.type === 'BUY' ? 'Buy' : 'Sell',
-      `GHS ${t.totalAmount.toFixed(2)}`,
-      t.pricePerUnit.toFixed(2),
-      `GHS ${(t.units * t.pricePerUnit).toFixed(2)}`
-    ]);
-
-    autoTable(doc, {
-      startY: 85,
-      head: [['Valuation Date', 'Transaction', 'Amount', 'Unit Price', 'Value']],
-      body: transRows.length > 0 ? transRows : [['-', 'No transactions', '-', '-', '-']],
-      theme: 'plain',
-      headStyles: { 
-        textColor: [0, 0, 0], 
-        fontStyle: 'bold',
-        cellPadding: 2,
-        lineWidth: { bottom: 0.5 },
-        lineColor: [0, 0, 0]
-      },
-      bodyStyles: { 
-        textColor: [0, 0, 0],
-        cellPadding: 2
-      },
-      columnStyles: {
-        0: { cellWidth: 30 },
-        1: { cellWidth: 30 },
-        2: { cellWidth: 40 },
-        3: { cellWidth: 30 },
-        4: { cellWidth: 40 },
-      },
-      margin: { left: 20, right: 20 }
-    });
-
-    // --- SUMMARY SECTION ---
-    const summaryY = (doc as any).lastAutoTable.finalY + 20;
-    doc.setFontSize(10);
-    
-    const summaryLabelX = 20;
-    const summaryValueX = 120;
-    let sY = summaryY;
-
-    const drawSummaryLine = (label: string, value: string, isCurrency: boolean = false) => {
-      doc.text(label, summaryLabelX, sY);
-      const displayValue = isCurrency ? `GHS ${value}` : value;
-      doc.text(displayValue, summaryValueX, sY, { align: 'right' });
-      sY += 8;
-    };
-
-    drawSummaryLine('Total Number Of Units', closingUnits.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
-    drawSummaryLine('Total purchase Amount', totalPurchaseAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }), true);
-    drawSummaryLine('Unit Price', closingNav.toFixed(4), true);
-    drawSummaryLine('Current Value', closingValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }), true);
-    drawSummaryLine('Year To Date(%)', ytdPct.toFixed(2));
-
-    return doc;
-  };
-
   const handleDownload = async () => {
-    if (!investor) return;
+    if (!investor || !fund) return;
     setIsGenerating(true);
     try {
-      const doc = await generatePDFData();
+      const doc = await generateStatementPDF(investor, fund, transactions, startDate, endDate);
       if (doc) {
         doc.save(`${investor.name.replace(/\s+/g, '_')}_Statement_${startDate}_to_${endDate}.pdf`);
         setIsSuccess(true);
@@ -218,10 +58,10 @@ export default function StatementModal({
   };
 
   const handleSendEmail = async () => {
-    if (!investor) return;
+    if (!investor || !fund) return;
     setEmailStatus('sending');
     try {
-      const doc = await generatePDFData();
+      const doc = await generateStatementPDF(investor, fund, transactions, startDate, endDate);
       if (doc) {
         const pdfBase64 = doc.output('datauristring').split(',')[1];
         
@@ -335,13 +175,17 @@ export default function StatementModal({
                   </div>
                 </div>
                 <div className="space-y-2">
-                  <div className="flex justify-between text-[10px]">
-                    <span className="text-slate-500">Current Units</span>
-                    <span className="text-slate-300">{investor?.unitsOwned.toLocaleString()}</span>
+                  <div className="flex justify-between text-[11px]">
+                    <span className="text-slate-500">Total Units</span>
+                    <span className="text-slate-200 font-medium">{(investor?.unitsOwned || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
                   </div>
-                  <div className="flex justify-between text-[10px]">
-                    <span className="text-slate-500">Current NAV</span>
-                    <span className="text-slate-300">{formatCurrency(fund?.nav || 1.0000)}</span>
+                  <div className="flex justify-between text-[11px]">
+                    <span className="text-slate-500">Current Unit Price</span>
+                    <span className="text-slate-200 font-medium">{formatCurrency(fund?.nav || 1.0000)}</span>
+                  </div>
+                  <div className="flex justify-between text-[11px] pt-1 border-t border-slate-700/50">
+                    <span className="text-slate-400 font-semibold uppercase tracking-tighter">Current Value</span>
+                    <span className="text-emerald-400 font-bold">{formatCurrency((investor?.unitsOwned || 0) * (fund?.nav || 1.0000))}</span>
                   </div>
                 </div>
               </div>

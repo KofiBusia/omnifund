@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { InvestmentAccount, Investor, Asset, Transaction } from '../types';
 import { cn, formatCurrency } from '../lib/utils';
 import { 
@@ -18,15 +18,26 @@ import {
   Upload,
   X,
   Search,
-  Download
+  Download,
+  FileText,
+  Loader2,
+  Sparkles,
+  Wand2,
+  CheckCircle2,
+  Brain,
+  Calendar
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { addDoc, collection, doc, updateDoc, deleteDoc, getDocs, query, where, writeBatch } from 'firebase/firestore';
+import { addDoc, collection, doc, updateDoc, deleteDoc, getDocs, query, where, writeBatch, serverTimestamp, increment, runTransaction } from 'firebase/firestore';
 import { db } from '../firebase';
 import { handleFirestoreError, OperationType } from '../lib/utils';
 import TransactionHistory from './TransactionHistory';
 import BulkTransactionModal from './BulkTransactionModal';
+import FundStatementModal from './FundStatementModal';
+import AIAccountAuditor from './AIAccountAuditor';
 import Papa from 'papaparse';
+import { IngestionEngine, IngestionResult } from '../services/ingestionService';
+import { STPService } from '../services/stpService';
 
 interface AccountManagementProps {
   accounts: InvestmentAccount[];
@@ -44,13 +55,34 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
   
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
   const [isHistoryModalOpen, setIsHistoryModalOpen] = useState(false);
+  const [isFundModalOpen, setIsFundModalOpen] = useState(false);
   const [isBulkModalOpen, setIsBulkModalOpen] = useState(false);
+  const [isAIAuditorOpen, setIsAIAuditorOpen] = useState(false);
+  const [selectedAccountForAI, setSelectedAccountForAI] = useState<InvestmentAccount | null>(null);
   const [selectedAccountForHistory, setSelectedAccountForHistory] = useState<InvestmentAccount | null>(null);
+  const [selectedAccountForStatement, setSelectedAccountForStatement] = useState<InvestmentAccount | null>(null);
   const [accountToDelete, setAccountToDelete] = useState<string | null>(null);
+  const [selectedAccountIds, setSelectedAccountIds] = useState<Set<string>>(new Set());
+  const [isBulkDeleteModalOpen, setIsBulkDeleteModalOpen] = useState(false);
   const [pinInput, setPinInput] = useState("");
   const [pinError, setPinError] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
+  
+  const [editingTransaction, setEditingTransaction] = useState<Transaction | null>(null);
+  const [isEditTransactionModalOpen, setIsEditTransactionModalOpen] = useState(false);
+  const [editTransactionForm, setEditTransactionForm] = useState({
+    type: 'BUY' as 'BUY' | 'SELL',
+    amount: 0,
+    units: 0,
+    timestamp: ''
+  });
+
+  const [isIngesting, setIsIngesting] = useState(false);
+  const [ingestionResult, setIngestionResult] = useState<IngestionResult | null>(null);
+  const [ingestionFiles, setIngestionFiles] = useState<{data: string, mimeType: string}[]>([]);
+  const [isProvisioning, setIsProvisioning] = useState(false);
+  const [stpLogs, setStpLogs] = useState<string[]>([]);
   
   const [newAccount, setNewAccount] = useState({
     name: '',
@@ -74,28 +106,137 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
 
   const handleAddAccount = async (e: React.FormEvent) => {
     e.preventDefault();
+    setIsProvisioning(true);
     try {
-      await addDoc(collection(db, 'accounts'), {
+      // 1. Create the Account Document
+      const docRef = await addDoc(collection(db, 'accounts'), {
         ...newAccount,
         cashBalance: newAccount.aum, // Initial AUM is all cash
         lastValuationDate: new Date().toISOString(),
         createdAt: new Date().toISOString()
       });
+
+      const createdAccount: InvestmentAccount = {
+        id: docRef.id,
+        ...newAccount,
+        cashBalance: newAccount.aum,
+        lastValuationDate: new Date().toISOString(),
+        createdAt: new Date().toISOString()
+      };
+
+      // 2. If Smart Ingestion was used, Provision the data
+      if (ingestionResult) {
+        const stp = new STPService();
+        // We include the newly created account in the context
+        const stpResult = await stp.provision(ingestionResult, { 
+          accounts: [...accounts, createdAccount], 
+          investors 
+        });
+        setStpLogs(stpResult.logs);
+        console.log("Ingestion Provisioning Result:", stpResult);
+      }
+
       setIsAddModalOpen(false);
       setNewAccount({ name: '', ticker: '', description: '', aum: 0, nav: 1.0000, totalUnits: 0, cashBalance: 0 });
+      setIngestionResult(null);
+      setIngestionFiles([]);
+      setStpLogs([]);
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, 'accounts');
+    } finally {
+      setIsProvisioning(false);
     }
   };
 
-  const filteredAccounts = accounts.filter(a => 
-    a.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
-    a.ticker.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    (a.description && a.description.toLowerCase().includes(searchTerm.toLowerCase()))
+  const handleIngestionFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+
+    setIsIngesting(true);
+    try {
+      const filePromises = Array.from(files).map((file: File) => {
+        return new Promise<{ data: string; mimeType: string }>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => {
+            const base64Data = (reader.result as string).split(',')[1];
+            resolve({ data: base64Data, mimeType: file.type });
+          };
+          reader.onerror = reject;
+          reader.readAsDataURL(file);
+        });
+      });
+
+      const processedFiles = await Promise.all(filePromises);
+      setIngestionFiles(processedFiles);
+      
+      const engine = new IngestionEngine();
+      const result = await engine.processCustodianExports(processedFiles, { accounts, investors });
+      
+      setIngestionResult(result);
+
+      // SMART AUTO-FILL: If the AI found a fund that matches a ticker or name, suggest filling
+      if (result.entities.funds.length > 0) {
+        const primaryFund = result.entities.funds[0];
+        
+        // Advanced: Calculate AUM from extracted mappings
+        const assetValue = result.mappings.fundToAsset
+          .filter(m => m.fundTicker === primaryFund.ticker)
+          .reduce((sum, m) => sum + m.value, 0);
+          
+        const subscriptionValue = result.mappings.investorToFund
+          .filter(m => m.fundTicker === primaryFund.ticker)
+          .reduce((sum, m) => {
+            const fund = result.entities.funds.find(f => f.ticker === m.fundTicker);
+            const nav = fund?.nav || primaryFund.nav || newAccount.nav || 1;
+            return sum + (m.units * nav);
+          }, 0);
+
+        setNewAccount(prev => ({
+          ...prev,
+          name: primaryFund.name || prev.name,
+          ticker: (primaryFund.ticker || prev.ticker).toUpperCase(),
+          aum: assetValue || subscriptionValue || prev.aum,
+          nav: primaryFund.nav || prev.nav || 1.0000
+        }));
+      }
+    } catch (err) {
+      console.error("Smart Ingestion Failed:", err);
+    } finally {
+      setIsIngesting(false);
+    }
+  };
+
+  const filteredAccounts = useMemo(() => 
+    accounts.filter(a => 
+      a.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
+      a.ticker.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      (a.description && a.description.toLowerCase().includes(searchTerm.toLowerCase()))
+    ),
+    [accounts, searchTerm]
   );
 
+  // Group investors and assets by accountId for O(1) access
+  const groupedEntities = useMemo(() => {
+    const investorMap = new Map<string, number>();
+    const portfolioMap = new Map<string, number>();
+
+    investors.forEach(i => {
+      investorMap.set(i.accountId, (investorMap.get(i.accountId) || 0) + 1);
+    });
+
+    portfolio.forEach(p => {
+      portfolioMap.set(p.accountId, (portfolioMap.get(p.accountId) || 0) + 1);
+    });
+
+    return { investorMap, portfolioMap };
+  }, [investors, portfolio]);
+
   const handleExportCSV = () => {
-    const exportData = filteredAccounts.map(account => ({
+    const accountsToExport = selectedAccountIds.size > 0 
+      ? accounts.filter(a => selectedAccountIds.has(a.id))
+      : filteredAccounts;
+
+    const exportData = accountsToExport.map(account => ({
       'Account Name': account.name,
       'Ticker': account.ticker,
       'Description': account.description || 'N/A',
@@ -126,53 +267,71 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
       return;
     }
 
-    if (!accountToDelete) return;
+    const idsToDelete = accountToDelete ? [accountToDelete] : Array.from(selectedAccountIds);
+    if (idsToDelete.length === 0) return;
 
     setIsDeleting(true);
     try {
-      const batch = writeBatch(db);
+      // 1. Parallelize fetching all associated document references for all accounts
+      const allDeletions = await Promise.all(idsToDelete.map(async (accId) => {
+        const [portfolioSnap, investorsSnap, transactionsSnap, valuationsSnap] = await Promise.all([
+          getDocs(query(collection(db, 'portfolio'), where('accountId', '==', accId))),
+          getDocs(query(collection(db, 'investors'), where('accountId', '==', accId))),
+          getDocs(query(collection(db, 'transactions'), where('accountId', '==', accId))),
+          getDocs(query(collection(db, 'valuations'), where('accountId', '==', accId)))
+        ]);
 
-      // 1. Delete associated portfolio assets
-      const portfolioQuery = query(collection(db, 'portfolio'), where('accountId', '==', accountToDelete));
-      const portfolioSnapshot = await getDocs(portfolioQuery);
-      portfolioSnapshot.forEach((doc) => {
-        batch.delete(doc.ref);
-      });
+        return [
+          ...portfolioSnap.docs.map(d => d.ref),
+          ...investorsSnap.docs.map(d => d.ref),
+          ...transactionsSnap.docs.map(d => d.ref),
+          ...valuationsSnap.docs.map(d => d.ref),
+          doc(db, 'accounts', accId)
+        ];
+      }));
 
-      // 2. Delete associated investors
-      const investorsQuery = query(collection(db, 'investors'), where('accountId', '==', accountToDelete));
-      const investorsSnapshot = await getDocs(investorsQuery);
-      investorsSnapshot.forEach((doc) => {
-        batch.delete(doc.ref);
-      });
+      const allRefs = allDeletions.flat();
 
-      // 3. Delete associated transactions
-      const transactionsQuery = query(collection(db, 'transactions'), where('accountId', '==', accountToDelete));
-      const transactionsSnapshot = await getDocs(transactionsQuery);
-      transactionsSnapshot.forEach((doc) => {
-        batch.delete(doc.ref);
-      });
+      // 2. Chunk deletions into batches (Firestore limit is 500 ops per batch)
+      const CHUNK_SIZE = 450;
+      const batches = [];
+      
+      for (let i = 0; i < allRefs.length; i += CHUNK_SIZE) {
+        const batch = writeBatch(db);
+        const chunk = allRefs.slice(i, i + CHUNK_SIZE);
+        chunk.forEach(ref => batch.delete(ref));
+        batches.push(batch.commit());
+      }
 
-      // 4. Delete associated valuations
-      const valuationsQuery = query(collection(db, 'valuations'), where('accountId', '==', accountToDelete));
-      const valuationsSnapshot = await getDocs(valuationsQuery);
-      valuationsSnapshot.forEach((doc) => {
-        batch.delete(doc.ref);
-      });
-
-      // 5. Delete the account itself
-      batch.delete(doc(db, 'accounts', accountToDelete));
-
-      await batch.commit();
+      await Promise.all(batches);
       
       setIsDeleteModalOpen(false);
       setAccountToDelete(null);
+      setSelectedAccountIds(new Set());
       setPinInput("");
       setPinError(false);
     } catch (error) {
-      handleFirestoreError(error, OperationType.DELETE, 'accounts');
+      handleFirestoreError(error, OperationType.DELETE, `accounts/${idsToDelete.join(',')}`);
     } finally {
       setIsDeleting(false);
+    }
+  };
+
+  const toggleAccountSelection = (id: string) => {
+    const next = new Set(selectedAccountIds);
+    if (next.has(id)) {
+      next.delete(id);
+    } else {
+      next.add(id);
+    }
+    setSelectedAccountIds(next);
+  };
+
+  const toggleAllSelection = () => {
+    if (selectedAccountIds.size === filteredAccounts.length) {
+      setSelectedAccountIds(new Set());
+    } else {
+      setSelectedAccountIds(new Set(filteredAccounts.map(a => a.id)));
     }
   };
 
@@ -197,14 +356,126 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
     }
   };
 
+  const handleEditTransaction = (t: Transaction) => {
+    setEditingTransaction(t);
+    setEditTransactionForm({
+      type: t.type,
+      amount: t.totalAmount,
+      units: t.units,
+      timestamp: new Date(t.timestamp).toISOString().split('T')[0]
+    });
+    setIsEditTransactionModalOpen(true);
+  };
+
+  const handleUpdateTransaction = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingTransaction) return;
+
+    const investor = investors.find(i => i.id === editingTransaction.investorId);
+    if (!investor) return;
+
+    const account = accounts.find(a => a.id === editingTransaction.accountId);
+    if (!account) return;
+
+    try {
+      await runTransaction(db, async (dbTransaction) => {
+        const accountRef = doc(db, 'accounts', account.id);
+        const investorRef = doc(db, 'investors', investor.id);
+        const transRef = doc(db, 'transactions', editingTransaction.id);
+
+        // 1. Calculate reversal of old transaction
+        let oldUnitsDelta = 0;
+        let oldAmountDelta = 0;
+
+        if (editingTransaction.type === 'BUY') {
+          oldUnitsDelta = -editingTransaction.units;
+          oldAmountDelta = -editingTransaction.totalAmount;
+        } else {
+          oldUnitsDelta = editingTransaction.units;
+          oldAmountDelta = editingTransaction.totalAmount;
+        }
+
+        // 2. Calculate impact of new transaction
+        let newUnitsDelta = 0;
+        let newAmountDelta = 0;
+
+        if (editTransactionForm.type === 'BUY') {
+          newUnitsDelta = editTransactionForm.units;
+          newAmountDelta = editTransactionForm.amount;
+        } else {
+          newUnitsDelta = -editTransactionForm.units;
+          newAmountDelta = -editTransactionForm.amount;
+        }
+
+        // Net change to apply
+        const netUnitsChange = oldUnitsDelta + newUnitsDelta;
+        const netAmountChange = oldAmountDelta + newAmountDelta;
+
+        // Update Account
+        dbTransaction.update(accountRef, {
+          totalUnits: increment(netUnitsChange),
+          cashBalance: increment(netAmountChange)
+        });
+
+        // Update Investor
+        dbTransaction.update(investorRef, {
+          unitsOwned: increment(netUnitsChange),
+          totalInvestment: increment(netAmountChange)
+        });
+
+        // Update Transaction
+        dbTransaction.update(transRef, {
+          type: editTransactionForm.type,
+          units: editTransactionForm.units,
+          totalAmount: editTransactionForm.amount,
+          pricePerUnit: editTransactionForm.units > 0 ? editTransactionForm.amount / editTransactionForm.units : 0,
+          timestamp: new Date(editTransactionForm.timestamp).toISOString()
+        });
+      });
+
+      setIsEditTransactionModalOpen(false);
+      setEditingTransaction(null);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, 'transactions');
+    }
+  };
+
   return (
     <div className="space-y-8">
       <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-3xl font-bold text-white">Investment Accounts</h2>
-          <p className="text-slate-400 mt-1">Manage fund products and investment portfolios</p>
+        <div className="flex items-center gap-4">
+          <button 
+            onClick={toggleAllSelection}
+            className={cn(
+              "p-2 rounded-lg border transition-all",
+              selectedAccountIds.size === filteredAccounts.length && filteredAccounts.length > 0
+                ? "bg-emerald-500/10 border-emerald-500 text-emerald-500"
+                : "bg-slate-800 border-slate-700 text-slate-500 hover:text-white"
+            )}
+            title="Select/Deselect All"
+          >
+            <CheckCircle2 className="w-5 h-5" />
+          </button>
+          <div>
+            <h2 className="text-3xl font-bold text-white">Investment Accounts</h2>
+            <p className="text-slate-400 mt-1">Manage fund products and investment portfolios</p>
+          </div>
         </div>
         <div className="flex items-center gap-4">
+          {selectedAccountIds.size > 0 && (
+            <motion.button 
+              initial={{ opacity: 0, x: 20 }}
+              animate={{ opacity: 1, x: 0 }}
+              onClick={() => {
+                setAccountToDelete(null);
+                setIsDeleteModalOpen(true);
+              }}
+              className="bg-red-600 hover:bg-red-500 text-white px-6 py-3 rounded-xl font-semibold flex items-center gap-2 transition-all shadow-lg shadow-red-600/20"
+            >
+              <Trash2 className="w-5 h-5" />
+              Delete {selectedAccountIds.size} Accounts
+            </motion.button>
+          )}
           <button 
             onClick={handleExportCSV}
             className="bg-slate-800 hover:bg-slate-700 text-white px-6 py-3 rounded-xl font-semibold flex items-center gap-2 transition-all border border-slate-700"
@@ -245,15 +516,28 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {filteredAccounts.map((account) => {
-          const accountInvestors = investors.filter(i => i.accountId === account.id);
-          const accountPortfolio = portfolio.filter(p => p.accountId === account.id);
+          const investorCount = groupedEntities.investorMap.get(account.id) || 0;
+          const portfolioCount = groupedEntities.portfolioMap.get(account.id) || 0;
           
           return (
             <motion.div 
               layout
               key={account.id}
-              className="bg-slate-900 border border-slate-800 rounded-3xl p-8 hover:border-emerald-500/50 transition-all group relative overflow-hidden"
+              onClick={() => toggleAccountSelection(account.id)}
+              className={cn(
+                "bg-slate-900 border rounded-3xl p-8 transition-all group relative overflow-hidden cursor-pointer",
+                selectedAccountIds.has(account.id) 
+                  ? "border-emerald-500 ring-2 ring-emerald-500/20" 
+                  : "border-slate-800 hover:border-emerald-500/50"
+              )}
             >
+              {selectedAccountIds.has(account.id) && (
+                <div className="absolute top-4 right-4 z-20">
+                  <div className="w-6 h-6 bg-emerald-500 rounded-full flex items-center justify-center border-2 border-slate-900">
+                    <CheckCircle2 className="w-4 h-4 text-white" />
+                  </div>
+                </div>
+              )}
               <div className="absolute top-0 right-0 p-8 opacity-5 group-hover:opacity-10 transition-opacity">
                 <PieChart className="w-32 h-32 text-emerald-500" />
               </div>
@@ -303,14 +587,34 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
                   <div className="flex items-center gap-6">
                     <div className="flex items-center gap-2">
                       <Users className="w-4 h-4 text-slate-500" />
-                      <span className="text-sm font-medium text-slate-300">{accountInvestors.length} Investors</span>
+                      <span className="text-sm font-medium text-slate-300">{investorCount} Investors</span>
                     </div>
                     <div className="flex items-center gap-2">
                       <TrendingUp className="w-4 h-4 text-slate-500" />
-                      <span className="text-sm font-medium text-slate-300">{accountPortfolio.length} Assets</span>
+                      <span className="text-sm font-medium text-slate-300">{portfolioCount} Assets</span>
                     </div>
                   </div>
-                  <div className="flex items-center gap-4">
+                  <div className="flex items-center gap-4" onClick={(e) => e.stopPropagation()}>
+                    <button 
+                      onClick={() => {
+                        setSelectedAccountForStatement(account);
+                        setIsFundModalOpen(true);
+                      }}
+                      className="p-2 hover:bg-blue-500/10 text-slate-500 hover:text-blue-500 rounded-lg transition-all"
+                      title="Print Statement"
+                    >
+                      <FileText className="w-5 h-5" />
+                    </button>
+                    <button 
+                      onClick={() => {
+                        setSelectedAccountForAI(account);
+                        setIsAIAuditorOpen(true);
+                      }}
+                      className="p-2 hover:bg-blue-500/10 text-slate-500 hover:text-blue-500 rounded-lg transition-all"
+                      title="AI Behavioral Audit"
+                    >
+                      <Brain className="w-5 h-5" />
+                    </button>
                     <button 
                       onClick={() => {
                         setSelectedAccountForHistory(account);
@@ -348,6 +652,22 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
           );
         })}
       </div>
+
+      <AnimatePresence>
+        {isAIAuditorOpen && selectedAccountForAI && (
+          <AIAccountAuditor
+            isOpen={isAIAuditorOpen}
+            onClose={() => {
+              setIsAIAuditorOpen(false);
+              setSelectedAccountForAI(null);
+            }}
+            account={selectedAccountForAI}
+            transactions={transactions.filter(t => t.accountId === selectedAccountForAI.id)}
+            portfolio={portfolio.filter(p => p.accountId === selectedAccountForAI.id)}
+            investors={investors.filter(i => i.accountId === selectedAccountForAI.id)}
+          />
+        )}
+      </AnimatePresence>
 
       {/* Edit Account Modal */}
       <AnimatePresence>
@@ -539,17 +859,110 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
                   />
                   <p className="text-[10px] text-slate-500 italic">Automatically calculated as AUM / NAV</p>
                 </div>
-                
-                <div className="bg-blue-500/5 border border-blue-500/20 p-4 rounded-2xl flex gap-3">
-                  <Info className="w-5 h-5 text-blue-500 flex-shrink-0" />
-                  <p className="text-xs text-slate-400">
-                    Creating an account establishes a new portfolio. You can add assets and investors to this account once created.
-                  </p>
+                         <div className="bg-blue-500/5 border border-blue-500/20 p-4 rounded-2xl flex flex-col gap-4">
+                  <div className="flex gap-3">
+                    <Sparkles className="w-5 h-5 text-blue-500 flex-shrink-0" />
+                    <div>
+                      <h4 className="text-sm font-bold text-white mb-1">Smart Ingestion (Optional)</h4>
+                      <p className="text-xs text-slate-400">
+                        Upload custodian files to automatically populate account data and bootstrap historical holdings.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="relative">
+                    <input 
+                      type="file" 
+                      id="smart-ingestion"
+                      className="hidden" 
+                      onChange={handleIngestionFileSelect}
+                      multiple
+                      accept=".csv,.xlsx,.xls,.pdf,.json,.xml"
+                    />
+                    <label 
+                      htmlFor="smart-ingestion"
+                      className={cn(
+                        "flex items-center justify-center gap-2 w-full py-4 border-2 border-dashed rounded-xl cursor-pointer transition-all",
+                        ingestionResult ? "border-emerald-500/50 bg-emerald-500/5 text-emerald-500" : "border-slate-700 bg-slate-800/50 text-slate-400 hover:border-blue-500/50 hover:bg-blue-500/5"
+                      )}
+                    >
+                      {isIngesting ? (
+                        <>
+                          <Loader2 className="w-5 h-5 animate-spin" />
+                          <span>Analyzing Data Spectrum...</span>
+                        </>
+                      ) : ingestionResult ? (
+                        <>
+                          <Wand2 className="w-5 h-5" />
+                          <span>
+                            {ingestionResult.entities.investors.length} Investors | {ingestionResult.entities.assets.length} Assets Identified
+                          </span>
+                        </>
+                      ) : (
+                        <>
+                          <Upload className="w-5 h-5" />
+                          <span>Bootstrap from Custodian Export</span>
+                        </>
+                      )}
+                    </label>
+                  </div>
+                  
+                  {ingestionResult && !isProvisioning && stpLogs.length === 0 && (
+                    <div className="p-3 bg-emerald-500/10 border border-emerald-500/20 rounded-xl space-y-2">
+                      <div className="text-[10px] text-emerald-500 font-bold uppercase tracking-wider flex items-center gap-2">
+                        <div className="w-1 h-1 bg-emerald-500 rounded-full animate-pulse" />
+                         AI Ingestion Engines Active
+                      </div>
+                      
+                      <div className="grid grid-cols-2 gap-2">
+                        <div className="bg-slate-900/50 p-2 rounded-lg border border-emerald-500/10">
+                          <p className="text-[10px] text-slate-500 uppercase font-bold">Holdings</p>
+                          <p className="text-xs text-white font-mono">{ingestionResult.entities.assets.length} Lines</p>
+                        </div>
+                        <div className="bg-slate-900/50 p-2 rounded-lg border border-emerald-500/10">
+                          <p className="text-[10px] text-slate-500 uppercase font-bold">Ledger</p>
+                          <p className="text-xs text-white font-mono">{ingestionResult.mappings.investorToFund.length} Subscriptions</p>
+                        </div>
+                      </div>
+
+                      {ingestionResult.entities.investors.length > 0 && (
+                        <div className="pt-2 border-t border-emerald-500/10">
+                          <p className="text-[10px] text-slate-500 uppercase font-bold mb-1">Identified Entities</p>
+                          <div className="flex flex-wrap gap-1">
+                            {ingestionResult.entities.investors.slice(0, 5).map((inv, i) => (
+                              <span key={i} className="text-[9px] bg-slate-900 text-slate-300 px-1.5 py-0.5 rounded border border-slate-800">
+                                {inv.name}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {(isProvisioning || stpLogs.length > 0) && (
+                    <div className="max-h-40 overflow-y-auto space-y-1 bg-slate-950 p-3 rounded-xl border border-slate-800 font-mono text-[10px]">
+                      <div className="flex items-center gap-2 text-emerald-500 mb-2 border-b border-emerald-500/10 pb-1">
+                        <div className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" />
+                        SYSTEM PROVISIONING LOG
+                      </div>
+                      {stpLogs.map((log, i) => (
+                        <div key={i} className={cn(
+                          "flex items-start gap-2",
+                          log.startsWith('FAILED') ? "text-red-400" : log.startsWith('ERROR') ? "text-amber-400" : "text-slate-400"
+                        )}>
+                          <span className="text-slate-600">[{new Date().toLocaleTimeString()}]</span>
+                          <span>{log}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
 
                 <div className="flex gap-4 pt-4">
                   <button 
                     type="button"
+                    disabled={isProvisioning}
                     onClick={() => setIsAddModalOpen(false)}
                     className="flex-1 py-3 px-4 bg-slate-800 hover:bg-slate-700 text-white font-semibold rounded-xl transition-all"
                   >
@@ -557,9 +970,20 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
                   </button>
                   <button 
                     type="submit"
-                    className="flex-1 py-3 px-4 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold rounded-xl transition-all shadow-lg shadow-emerald-600/20"
+                    disabled={isIngesting || isProvisioning}
+                    className="flex-1 py-3 px-4 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold rounded-xl transition-all shadow-lg shadow-emerald-600/20 flex items-center justify-center gap-2"
                   >
-                    Create Account
+                    {isProvisioning ? (
+                      <>
+                        <Loader2 className="w-5 h-5 animate-spin" />
+                        Provisioning...
+                      </>
+                    ) : (
+                      <>
+                        <CheckCircle2 className="w-5 h-5" />
+                        Create & Provision
+                      </>
+                    )}
                   </button>
                 </div>
               </form>
@@ -585,6 +1009,7 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
                 <button 
                   onClick={() => {
                     setIsDeleteModalOpen(false);
+                    setAccountToDelete(null);
                     setPinInput("");
                     setPinError(false);
                   }}
@@ -594,9 +1019,14 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
                 </button>
               </div>
 
-              <h3 className="text-2xl font-bold text-white mb-2">Delete Account?</h3>
+              <h3 className="text-2xl font-bold text-white mb-2">
+                {accountToDelete ? "Delete Account?" : `Delete ${selectedAccountIds.size} Accounts?`}
+              </h3>
               <p className="text-slate-400 mb-6">
-                This action is permanent and will delete all associated assets, investors, and transaction history.
+                {accountToDelete 
+                  ? "This action is permanent and will delete all associated assets, investors, and transaction history for this account."
+                  : `This action is permanent and will delete all assets, investors, and transaction history for these ${selectedAccountIds.size} accounts.`
+                }
               </p>
 
               <div className="space-y-4 mb-8">
@@ -629,6 +1059,7 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
                 <button 
                   onClick={() => {
                     setIsDeleteModalOpen(false);
+                    setAccountToDelete(null);
                     setPinInput("");
                     setPinError(false);
                   }}
@@ -680,6 +1111,7 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
                 accounts={accounts} 
                 investors={investors} 
                 filterByAccountId={selectedAccountForHistory.id}
+                onEditTransaction={handleEditTransaction}
                 title="Account Transactions"
               />
             </motion.div>
@@ -693,6 +1125,7 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
           transactions={transactions} 
           accounts={accounts} 
           investors={investors} 
+          onEditTransaction={handleEditTransaction}
           title="All Account Transactions"
         />
       </div>
@@ -703,6 +1136,142 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
         investors={investors}
         accounts={accounts}
       />
+
+      <FundStatementModal 
+        isOpen={isFundModalOpen}
+        onClose={() => {
+          setIsFundModalOpen(false);
+          setSelectedAccountForStatement(null);
+        }}
+        fund={selectedAccountForStatement}
+        portfolio={portfolio}
+        transactions={transactions}
+      />
+
+      <AnimatePresence>
+        {isEditTransactionModalOpen && editingTransaction && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => {
+                setIsEditTransactionModalOpen(false);
+                setEditingTransaction(null);
+              }}
+              className="absolute inset-0 bg-slate-950/90 backdrop-blur-md"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="relative w-full max-w-lg bg-slate-900 border border-slate-800 rounded-3xl p-8 shadow-2xl"
+            >
+              <div className="flex items-center justify-between mb-6">
+                <div>
+                  <h3 className="text-2xl font-bold text-white">Edit Transaction</h3>
+                  <p className="text-slate-400 text-sm">
+                    Investor: {investors.find(i => i.id === editingTransaction.investorId)?.name}
+                  </p>
+                </div>
+                <button 
+                  onClick={() => setIsEditTransactionModalOpen(false)}
+                  className="p-2 hover:bg-slate-800 rounded-xl text-slate-400 transition-colors"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <form onSubmit={handleUpdateTransaction} className="space-y-6">
+                <div className="flex p-1 bg-slate-800 rounded-xl">
+                  <button
+                    type="button"
+                    onClick={() => setEditTransactionForm({ ...editTransactionForm, type: 'BUY' })}
+                    className={cn(
+                      "flex-1 py-2 rounded-lg text-sm font-bold transition-all",
+                      editTransactionForm.type === 'BUY' ? "bg-emerald-600 text-white" : "text-slate-400"
+                    )}
+                  >
+                    Subscription
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEditTransactionForm({ ...editTransactionForm, type: 'SELL' })}
+                    className={cn(
+                      "flex-1 py-2 rounded-lg text-sm font-bold transition-all",
+                      editTransactionForm.type === 'SELL' ? "bg-red-600 text-white" : "text-slate-400"
+                    )}
+                  >
+                    Redemption
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">Units</label>
+                    <input 
+                      required
+                      type="number" 
+                      step="0.000001"
+                      value={editTransactionForm.units}
+                      onChange={(e) => setEditTransactionForm({...editTransactionForm, units: Number(e.target.value)})}
+                      className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">Total Amount (GH₵)</label>
+                    <input 
+                      required
+                      type="number" 
+                      step="0.01"
+                      value={editTransactionForm.amount}
+                      onChange={(e) => setEditTransactionForm({...editTransactionForm, amount: Number(e.target.value)})}
+                      className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none"
+                    />
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">Effective Price Per Unit</label>
+                  <div className="bg-slate-900 border border-slate-800 px-4 py-3 rounded-xl text-emerald-400 font-mono font-bold">
+                    {formatCurrency(editTransactionForm.units > 0 ? editTransactionForm.amount / editTransactionForm.units : 0)}
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">Transaction Date</label>
+                  <div className="relative">
+                    <Calendar className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+                    <input 
+                      required
+                      type="date" 
+                      value={editTransactionForm.timestamp}
+                      onChange={(e) => setEditTransactionForm({...editTransactionForm, timestamp: e.target.value})}
+                      className="w-full bg-slate-800 border border-slate-700 rounded-xl pl-11 pr-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex gap-4 pt-4">
+                  <button 
+                    type="button"
+                    onClick={() => setIsEditTransactionModalOpen(false)}
+                    className="flex-1 py-3 px-4 bg-slate-800 hover:bg-slate-700 text-white font-semibold rounded-xl transition-all"
+                  >
+                    Cancel
+                  </button>
+                  <button 
+                    type="submit"
+                    className="flex-1 py-3 px-4 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold rounded-xl transition-all shadow-lg"
+                  >
+                    Save Changes
+                  </button>
+                </div>
+              </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

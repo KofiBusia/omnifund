@@ -66,6 +66,7 @@
     "/accounts/{accountId}": { "schema": "investmentAccount", "description": "Investment accounts/products." },
     "/investors/{investorId}": { "schema": "investor", "description": "Investor records." },
     "/transactions/{transactionId}": { "schema": "transaction", "description": "Historical transactions." },
-    "/portfolio/{assetId}": { "schema": "asset", "description": "Assets held by accounts." }
+    "/portfolio/{assetId}": { "schema": "asset", "description": "Assets held by accounts." },
+    "/valuations/{valuationId}": { "schema": "valuation", "description": "Historical NAV and AUM records." }
   }
 }

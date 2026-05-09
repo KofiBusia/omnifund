@@ -22,7 +22,9 @@ import {
   AlertTriangle,
   Activity,
   BarChart3,
-  Download
+  Download,
+  Calendar,
+  CheckCircle2
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { addDoc, collection, serverTimestamp, doc, updateDoc, increment, runTransaction, writeBatch } from 'firebase/firestore';
@@ -36,6 +38,7 @@ import BulkTransactionModal from './BulkTransactionModal';
 import StatementModal from './StatementModal';
 import EmailInvestorModal from './EmailInvestorModal';
 import BulkEmailModal from './BulkEmailModal';
+import BulkStatementModal from './BulkStatementModal';
 import { 
   AreaChart, 
   Area, 
@@ -112,18 +115,40 @@ export default function InvestorManagement({
   const [isStatementModalOpen, setIsStatementModalOpen] = useState(false);
   const [isEmailModalOpen, setIsEmailModalOpen] = useState(false);
   const [isBulkEmailModalOpen, setIsBulkEmailModalOpen] = useState(false);
+  const [isBulkStatementModalOpen, setIsBulkStatementModalOpen] = useState(false);
   const [isGmailConnected, setIsGmailConnected] = useState(false);
   const [isBackfilling, setIsBackfilling] = useState(false);
   const [selectedInvestor, setSelectedInvestor] = useState<Investor | null>(null);
+  const [editingTransaction, setEditingTransaction] = useState<Transaction | null>(null);
+  const [isEditTransactionModalOpen, setIsEditTransactionModalOpen] = useState(false);
+  const [editTransactionForm, setEditTransactionForm] = useState({
+    type: 'BUY' as 'BUY' | 'SELL',
+    amount: 0,
+    units: 0,
+    timestamp: ''
+  });
   const [selectedInvestorForStatement, setSelectedInvestorForStatement] = useState<Investor | null>(null);
   const [selectedInvestorForEmail, setSelectedInvestorForEmail] = useState<Investor | null>(null);
+  const [selectedInvestorIds, setSelectedInvestorIds] = useState<Set<string>>(new Set());
   
   const [newInvestor, setNewInvestor] = useState({ 
     name: '', 
     email: '', 
+    phone: '',
     investmentAmount: 0,
-    accountId: fund?.id || (accounts.length > 0 ? accounts[0].id : '')
+    accountId: fund?.id || (accounts.length > 0 ? accounts[0].id : ''),
+    onboardDate: new Date().toISOString().split('T')[0]
   });
+
+  // Ensure accountId is set when accounts load
+  useEffect(() => {
+    if (!newInvestor.accountId && (fund?.id || accounts.length > 0)) {
+      setNewInvestor(prev => ({
+        ...prev,
+        accountId: fund?.id || accounts[0].id
+      }));
+    }
+  }, [fund, accounts, newInvestor.accountId]);
 
   const [transaction, setTransaction] = useState({
     type: 'BUY' as 'BUY' | 'SELL',
@@ -151,17 +176,42 @@ export default function InvestorManagement({
     }
   };
 
-  const filteredInvestors = investors.filter(i => 
-    i.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
-    i.email.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    (i.investorId && i.investorId.toLowerCase().includes(searchTerm.toLowerCase()))
+  const filteredInvestors = useMemo(() => 
+    investors.filter(i => 
+      i.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
+      (i.email && i.email.toLowerCase().includes(searchTerm.toLowerCase())) ||
+      (i.investorId && i.investorId.toLowerCase().includes(searchTerm.toLowerCase()))
+    ),
+    [investors, searchTerm]
   );
+
+  const selectedInvestors = useMemo(() => {
+    return investors.filter(i => selectedInvestorIds.has(i.id));
+  }, [investors, selectedInvestorIds]);
+
+  const toggleSelectAll = () => {
+    if (selectedInvestorIds.size === filteredInvestors.length) {
+      setSelectedInvestorIds(new Set());
+    } else {
+      setSelectedInvestorIds(new Set(filteredInvestors.map(i => i.id)));
+    }
+  };
+
+  const toggleSelectInvestor = (id: string) => {
+    const newSelected = new Set(selectedInvestorIds);
+    if (newSelected.has(id)) {
+      newSelected.delete(id);
+    } else {
+      newSelected.add(id);
+    }
+    setSelectedInvestorIds(newSelected);
+  };
 
   const handleExportCSV = () => {
     const exportData = filteredInvestors.map(investor => ({
       'Investor ID': investor.investorId || 'N/A',
       'Name': investor.name,
-      'Email': investor.email,
+      'Email': investor.email || 'N/A',
       'Account ID': investor.accountId,
       'Units Owned': investor.unitsOwned.toFixed(4),
       'Total Investment (GHS)': investor.totalInvestment.toFixed(2),
@@ -203,10 +253,12 @@ export default function InvestorManagement({
           investorId,
           name: newInvestor.name,
           email: newInvestor.email,
+          phone: newInvestor.phone,
           accountId: newInvestor.accountId,
           unitsOwned: unitsToAllocate,
           totalInvestment: newInvestor.investmentAmount,
           currentValue: newInvestor.investmentAmount,
+          onboardDate: newInvestor.onboardDate,
           uid: `manual_${Date.now()}`
         });
 
@@ -230,7 +282,7 @@ export default function InvestorManagement({
       });
 
       setIsAddModalOpen(false);
-      setNewInvestor({ ...newInvestor, name: '', email: '', investmentAmount: 0 });
+      setNewInvestor({ ...newInvestor, name: '', email: '', phone: '', investmentAmount: 0, onboardDate: new Date().toISOString().split('T')[0] });
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, 'investors');
     }
@@ -288,6 +340,90 @@ export default function InvestorManagement({
 
       setIsTransactionModalOpen(false);
       setTransaction({ type: 'BUY', amount: 0, units: 0 });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, 'transactions');
+    }
+  };
+
+  const handleEditTransaction = (t: Transaction) => {
+    setEditingTransaction(t);
+    setEditTransactionForm({
+      type: t.type,
+      amount: t.totalAmount,
+      units: t.units,
+      timestamp: new Date(t.timestamp).toISOString().split('T')[0]
+    });
+    setIsEditTransactionModalOpen(true);
+  };
+
+  const handleUpdateTransaction = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingTransaction) return;
+
+    const investor = investors.find(i => i.id === editingTransaction.investorId);
+    if (!investor) return;
+
+    const account = accounts.find(a => a.id === editingTransaction.accountId);
+    if (!account) return;
+
+    try {
+      await runTransaction(db, async (dbTransaction) => {
+        const accountRef = doc(db, 'accounts', account.id);
+        const investorRef = doc(db, 'investors', investor.id);
+        const transRef = doc(db, 'transactions', editingTransaction.id);
+
+        // 1. Calculate reversal of old transaction
+        let oldUnitsDelta = 0;
+        let oldAmountDelta = 0;
+
+        if (editingTransaction.type === 'BUY') {
+          oldUnitsDelta = -editingTransaction.units;
+          oldAmountDelta = -editingTransaction.totalAmount;
+        } else {
+          oldUnitsDelta = editingTransaction.units;
+          oldAmountDelta = editingTransaction.totalAmount; // Reversing a SELL adds back the cash flow impact
+        }
+
+        // 2. Calculate impact of new transaction
+        let newUnitsDelta = 0;
+        let newAmountDelta = 0;
+
+        if (editTransactionForm.type === 'BUY') {
+          newUnitsDelta = editTransactionForm.units;
+          newAmountDelta = editTransactionForm.amount;
+        } else {
+          newUnitsDelta = -editTransactionForm.units;
+          newAmountDelta = -editTransactionForm.amount; // SELL is negative impact on net investment
+        }
+
+        // Net change to apply
+        const netUnitsChange = oldUnitsDelta + newUnitsDelta;
+        const netAmountChange = oldAmountDelta + newAmountDelta;
+
+        // Update Account
+        dbTransaction.update(accountRef, {
+          totalUnits: increment(netUnitsChange),
+          cashBalance: increment(netAmountChange)
+        });
+
+        // Update Investor
+        dbTransaction.update(investorRef, {
+          unitsOwned: increment(netUnitsChange),
+          totalInvestment: increment(netAmountChange)
+        });
+
+        // Update Transaction
+        dbTransaction.update(transRef, {
+          type: editTransactionForm.type,
+          units: editTransactionForm.units,
+          totalAmount: editTransactionForm.amount,
+          pricePerUnit: editTransactionForm.units > 0 ? editTransactionForm.amount / editTransactionForm.units : 0,
+          timestamp: new Date(editTransactionForm.timestamp).toISOString()
+        });
+      });
+
+      setIsEditTransactionModalOpen(false);
+      setEditingTransaction(null);
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, 'transactions');
     }
@@ -402,11 +538,19 @@ export default function InvestorManagement({
           </button>
           <button 
             onClick={() => setIsBulkEmailModalOpen(true)}
-            disabled={!isGmailConnected || filteredInvestors.length === 0}
+            disabled={!isGmailConnected || (selectedInvestorIds.size === 0 && filteredInvestors.length === 0)}
             className="bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-white px-4 py-3 rounded-xl font-semibold flex items-center gap-2 transition-all border border-slate-700"
           >
             <Users className="w-5 h-5" />
-            Send to All
+            {selectedInvestorIds.size > 0 ? `Send to Selected (${selectedInvestorIds.size})` : 'Send to All'}
+          </button>
+          <button 
+            onClick={() => setIsBulkStatementModalOpen(true)}
+            disabled={!isGmailConnected || (selectedInvestorIds.size === 0 && filteredInvestors.length === 0)}
+            className="bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-white px-4 py-3 rounded-xl font-semibold flex items-center gap-2 transition-all border border-slate-700"
+          >
+            <FileText className="w-5 h-5" />
+            {selectedInvestorIds.size > 0 ? `Statements to Selected (${selectedInvestorIds.size})` : 'Statements to All'}
           </button>
           <button 
             onClick={handleExportCSV}
@@ -451,6 +595,14 @@ export default function InvestorManagement({
         <table className="w-full text-left border-collapse">
           <thead>
             <tr className="bg-slate-800/50 border-b border-slate-800">
+              <th className="px-6 py-4 w-10">
+                <input 
+                  type="checkbox"
+                  checked={filteredInvestors.length > 0 && selectedInvestorIds.size === filteredInvestors.length}
+                  onChange={toggleSelectAll}
+                  className="w-4 h-4 rounded border-slate-700 bg-slate-800 text-emerald-500 focus:ring-emerald-500 focus:ring-offset-slate-900"
+                />
+              </th>
               <th className="px-6 py-4 text-xs font-semibold text-slate-400 uppercase tracking-wider">ID</th>
               <th className="px-6 py-4 text-xs font-semibold text-slate-400 uppercase tracking-wider">Investor</th>
               <th className="px-6 py-4 text-xs font-semibold text-slate-400 uppercase tracking-wider">Units Owned</th>
@@ -471,8 +623,19 @@ export default function InvestorManagement({
                   initial={{ opacity: 0 }}
                   animate={{ opacity: 1 }}
                   key={investor.id} 
-                  className="hover:bg-slate-800/30 transition-colors group"
+                  className={cn(
+                    "hover:bg-slate-800/30 transition-colors group",
+                    selectedInvestorIds.has(investor.id) && "bg-emerald-500/5"
+                  )}
                 >
+                  <td className="px-6 py-4">
+                    <input 
+                      type="checkbox"
+                      checked={selectedInvestorIds.has(investor.id)}
+                      onChange={() => toggleSelectInvestor(investor.id)}
+                      className="w-4 h-4 rounded border-slate-700 bg-slate-800 text-emerald-500 focus:ring-emerald-500 focus:ring-offset-slate-900"
+                    />
+                  </td>
                   <td className="px-6 py-4">
                     <span className="text-xs font-mono text-emerald-500 bg-emerald-500/10 px-2 py-1 rounded border border-emerald-500/20">
                       {investor.investorId || 'N/A'}
@@ -485,7 +648,9 @@ export default function InvestorManagement({
                       </div>
                       <div>
                         <p className="text-sm font-semibold text-white">{investor.name}</p>
-                        <p className="text-xs text-slate-500">{investor.email}</p>
+                        <p className="text-xs text-slate-500">
+                          {investor.email || 'No email'} {investor.phone ? `• ${investor.phone}` : ''}
+                        </p>
                       </div>
                     </div>
                   </td>
@@ -573,8 +738,18 @@ export default function InvestorManagement({
       <BulkEmailModal 
         isOpen={isBulkEmailModalOpen}
         onClose={() => setIsBulkEmailModalOpen(false)}
-        investors={filteredInvestors}
+        investors={selectedInvestorIds.size > 0 ? selectedInvestors : filteredInvestors}
         accounts={accounts}
+        isGmailConnected={isGmailConnected}
+      />
+
+      <BulkStatementModal 
+        isOpen={isBulkStatementModalOpen}
+        onClose={() => setIsBulkStatementModalOpen(false)}
+        investors={selectedInvestorIds.size > 0 ? selectedInvestors : filteredInvestors}
+        accounts={accounts}
+        transactions={transactions}
+        valuations={valuations}
         isGmailConnected={isGmailConnected}
       />
 
@@ -619,16 +794,27 @@ export default function InvestorManagement({
                     placeholder="e.g. John Doe"
                   />
                 </div>
-                <div className="space-y-2">
-                  <label className="text-sm font-medium text-slate-400">Email Address</label>
-                  <input 
-                    required
-                    type="email" 
-                    value={newInvestor.email}
-                    onChange={(e) => setNewInvestor({...newInvestor, email: e.target.value})}
-                    className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
-                    placeholder="john@example.com"
-                  />
+                <div className="grid grid-cols-2 gap-6">
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium text-slate-400">Email Address (Optional)</label>
+                    <input 
+                      type="email" 
+                      value={newInvestor.email}
+                      onChange={(e) => setNewInvestor({...newInvestor, email: e.target.value})}
+                      className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
+                      placeholder="john@example.com"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium text-slate-400">Phone Number (Optional)</label>
+                    <input 
+                      type="tel" 
+                      value={newInvestor.phone}
+                      onChange={(e) => setNewInvestor({...newInvestor, phone: e.target.value})}
+                      className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
+                      placeholder="e.g. 0244123456"
+                    />
+                  </div>
                 </div>
                 <div className="space-y-2">
                   <label className="text-sm font-medium text-slate-400">Investment Account</label>
@@ -656,6 +842,16 @@ export default function InvestorManagement({
                   <p className="text-[10px] text-slate-500 italic">
                     Units will be allocated based on current NAV: {formatCurrency(accounts.find(a => a.id === newInvestor.accountId)?.nav || 1.0000)}
                   </p>
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-slate-400">Onboarding Date (Optional)</label>
+                  <input 
+                    type="date" 
+                    value={newInvestor.onboardDate}
+                    onChange={(e) => setNewInvestor({...newInvestor, onboardDate: e.target.value})}
+                    className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
+                  />
+                  <p className="text-[10px] text-slate-500 italic">Used as a reference for starting investment statements.</p>
                 </div>
                 <div className="flex gap-4 pt-4">
                   <button 
@@ -957,6 +1153,7 @@ export default function InvestorManagement({
                 accounts={accounts} 
                 investors={investors} 
                 filterByInvestorId={selectedInvestor.id}
+                onEditTransaction={handleEditTransaction}
                 title="Investor Transactions"
               />
             </motion.div>
@@ -970,6 +1167,7 @@ export default function InvestorManagement({
           transactions={transactions} 
           accounts={accounts} 
           investors={investors} 
+          onEditTransaction={handleEditTransaction}
           title="Recent Fund Transactions"
         />
       </div>
@@ -994,6 +1192,131 @@ export default function InvestorManagement({
         valuations={valuations}
         isGmailConnected={isGmailConnected}
       />
+
+      <AnimatePresence>
+        {isEditTransactionModalOpen && editingTransaction && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => {
+                setIsEditTransactionModalOpen(false);
+                setEditingTransaction(null);
+              }}
+              className="absolute inset-0 bg-slate-950/90 backdrop-blur-md"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="relative w-full max-w-lg bg-slate-900 border border-slate-800 rounded-3xl p-8 shadow-2xl"
+            >
+              <div className="flex items-center justify-between mb-6">
+                <div>
+                  <h3 className="text-2xl font-bold text-white">Edit Transaction</h3>
+                  <p className="text-slate-400 text-sm">
+                    Investor: {investors.find(i => i.id === editingTransaction.investorId)?.name}
+                  </p>
+                </div>
+                <button 
+                  onClick={() => setIsEditTransactionModalOpen(false)}
+                  className="p-2 hover:bg-slate-800 rounded-xl text-slate-400 transition-colors"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <form onSubmit={handleUpdateTransaction} className="space-y-6">
+                <div className="flex p-1 bg-slate-800 rounded-xl">
+                  <button
+                    type="button"
+                    onClick={() => setEditTransactionForm({ ...editTransactionForm, type: 'BUY' })}
+                    className={cn(
+                      "flex-1 py-2 rounded-lg text-sm font-bold transition-all",
+                      editTransactionForm.type === 'BUY' ? "bg-emerald-600 text-white" : "text-slate-400"
+                    )}
+                  >
+                    Subscription
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEditTransactionForm({ ...editTransactionForm, type: 'SELL' })}
+                    className={cn(
+                      "flex-1 py-2 rounded-lg text-sm font-bold transition-all",
+                      editTransactionForm.type === 'SELL' ? "bg-red-600 text-white" : "text-slate-400"
+                    )}
+                  >
+                    Redemption
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">Units</label>
+                    <input 
+                      required
+                      type="number" 
+                      step="0.000001"
+                      value={editTransactionForm.units}
+                      onChange={(e) => setEditTransactionForm({...editTransactionForm, units: Number(e.target.value)})}
+                      className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">Total Amount (GH₵)</label>
+                    <input 
+                      required
+                      type="number" 
+                      step="0.01"
+                      value={editTransactionForm.amount}
+                      onChange={(e) => setEditTransactionForm({...editTransactionForm, amount: Number(e.target.value)})}
+                      className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none"
+                    />
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">Effective Price Per Unit</label>
+                  <div className="bg-slate-900 border border-slate-800 px-4 py-3 rounded-xl text-emerald-400 font-mono font-bold">
+                    {formatCurrency(editTransactionForm.units > 0 ? editTransactionForm.amount / editTransactionForm.units : 0)}
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">Transaction Date</label>
+                  <div className="relative">
+                    <Calendar className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+                    <input 
+                      required
+                      type="date" 
+                      value={editTransactionForm.timestamp}
+                      onChange={(e) => setEditTransactionForm({...editTransactionForm, timestamp: e.target.value})}
+                      className="w-full bg-slate-800 border border-slate-700 rounded-xl pl-11 pr-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex gap-4 pt-4">
+                  <button 
+                    type="button"
+                    onClick={() => setIsEditTransactionModalOpen(false)}
+                    className="flex-1 py-3 px-4 bg-slate-800 hover:bg-slate-700 text-white font-semibold rounded-xl transition-all"
+                  >
+                    Cancel
+                  </button>
+                  <button 
+                    type="submit"
+                    className="flex-1 py-3 px-4 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold rounded-xl transition-all shadow-lg"
+                  >
+                    Save Changes
+                  </button>
+                </div>
+              </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

@@ -82,7 +82,7 @@ export default function EmailInvestorModal({ isOpen, onClose, investor, fund, is
                 </div>
                 <div>
                   <h3 className="text-xl font-bold text-white">Send Notification</h3>
-                  <p className="text-slate-400 text-xs">{investor?.name} ({investor?.email})</p>
+                  <p className="text-slate-400 text-xs">{investor?.name} ({investor?.email || 'No email saved'})</p>
                 </div>
               </div>
               <button 
@@ -117,6 +117,13 @@ export default function EmailInvestorModal({ isOpen, onClose, investor, fund, is
                 />
               </div>
 
+              {!investor?.email && (
+                <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-xl flex items-start gap-3">
+                  <AlertCircle className="w-4 h-4 text-amber-500 flex-shrink-0 mt-0.5" />
+                  <p className="text-xs text-amber-400">This investor does not have an email address. You must update their record to send notifications.</p>
+                </div>
+              )}
+
               {errorMessage && (
                 <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-xl flex items-start gap-3">
                   <AlertCircle className="w-4 h-4 text-red-500 flex-shrink-0 mt-0.5" />
@@ -134,7 +141,7 @@ export default function EmailInvestorModal({ isOpen, onClose, investor, fund, is
                 </button>
                 <button
                   type="submit"
-                  disabled={status === 'sending' || status === 'success' || !isGmailConnected}
+                  disabled={status === 'sending' || status === 'success' || !isGmailConnected || !investor?.email}
                   className={cn(
                     "flex-[2] py-4 px-4 font-bold rounded-2xl transition-all flex items-center justify-center gap-2 shadow-lg",
                     status === 'success' ? "bg-emerald-500 text-white" :

@@ -8,7 +8,8 @@ import {
   CheckCircle2, 
   Loader2,
   FileText,
-  ArrowRight
+  ArrowRight,
+  Calendar
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import Papa from 'papaparse';
@@ -29,6 +30,7 @@ interface BulkRow {
   type: 'BUY' | 'SELL';
   amount: number;
   email?: string;
+  phone?: string;
 }
 
 interface ProcessedRow extends BulkRow {
@@ -41,6 +43,7 @@ interface ProcessedRow extends BulkRow {
 export default function BulkTransactionModal({ isOpen, onClose, investors, accounts }: BulkTransactionModalProps) {
   const [processedRows, setProcessedRows] = useState<ProcessedRow[]>([]);
   const [selectedAccountId, setSelectedAccountId] = useState<string>(accounts[0]?.id || '');
+  const [bulkDate, setBulkDate] = useState<string>(new Date().toISOString().split('T')[0]);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isSmartProcessing, setIsSmartProcessing] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -49,11 +52,11 @@ export default function BulkTransactionModal({ isOpen, onClose, investors, accou
   const selectedAccount = accounts.find(a => a.id === selectedAccountId);
 
   const downloadTemplate = () => {
-    const headers = ['name', 'type', 'amount'];
+    const headers = ['name', 'type', 'amount', 'email', 'phone'];
     const sampleRows = [
-      ['John Doe', 'BUY', '5000'],
-      ['Jane Smith', 'SELL', '1000'],
-      ['New Investor', 'BUY', '2500']
+      ['John Doe', 'BUY', '5000', 'john@example.com', '0244123456'],
+      ['Jane Smith', 'SELL', '1000', '', ''],
+      ['New Investor', 'BUY', '2500', 'new@investor.com', '0555987654']
     ];
     const csvContent = [headers, ...sampleRows].map(row => row.join(',')).join('\n');
     const blob = new Blob([csvContent], { type: 'text/csv' });
@@ -77,13 +80,16 @@ export default function BulkTransactionModal({ isOpen, onClose, investors, accou
           const rows = results.data as any[];
           const validated = rows.map(row => {
             // Flexible header mapping
-            const name = (row['FULL NAME'] || row.name || row['Investor Name'])?.trim();
+            const name = (row['FULL NAME'] || row.name || row['Investor Name'] || row.Investor)?.trim();
             const typeRaw = (row.TYPE || row.type || row['Transaction Type'])?.trim().toUpperCase();
-            const type = (typeRaw === 'BUY' || typeRaw === 'SELL') ? typeRaw : 'BUY';
-            const amount = Number(row['CONTRIBUTION AMOUNT'] || row.amount || row.Amount);
-            const email = (row['Email Address'] || row.email)?.trim();
+            const type = (typeRaw === 'BUY' || typeRaw === 'SELL' || typeRaw === 'SUBSCRIPTION' || typeRaw === 'REDEMPTION') 
+              ? (typeRaw === 'REDEMPTION' ? 'SELL' : (typeRaw === 'SUBSCRIPTION' ? 'BUY' : typeRaw)) 
+              : 'BUY';
+            const amount = Number(String(row['CONTRIBUTION AMOUNT'] || row.amount || row.Amount || row.Value).replace(/[^0-9.-]+/g,""));
+            const email = (row['Email Address'] || row.email || row.Email)?.trim();
+            const phone = (row['Phone Number'] || row.phone || row.Phone || row.Contact)?.trim();
 
-            return validateRow({ name, type, amount, email });
+            return validateRow({ name, type, amount, email, phone });
           });
           setProcessedRows(validated);
         }
@@ -98,7 +104,9 @@ export default function BulkTransactionModal({ isOpen, onClose, investors, accou
         const validated = extracted.map(row => validateRow({
           name: row.name,
           type: row.type,
-          amount: row.amount
+          amount: row.amount,
+          email: row.email,
+          phone: row.phone
         }));
         
         setProcessedRows(validated);
@@ -178,16 +186,27 @@ export default function BulkTransactionModal({ isOpen, onClose, investors, accou
               investorId,
               name: row.name,
               email: row.email || defaultEmail,
+              phone: row.phone || '',
               accountId: selectedAccount.id,
               unitsOwned: 0,
               totalInvestment: 0,
               currentValue: 0,
-              uid: `bulk_${Date.now()}_${i}`
+              onboardDate: bulkDate,
+              uid: `bulk_${Date.now()}_${i}`,
+              kycStatus: 'pending'
             });
           } else {
             investorRef = doc(db, 'investors', row.investor!.id);
             unitsOwned = row.investor!.unitsOwned;
             totalInvestment = row.investor!.totalInvestment;
+
+            // Optionally update contact info if provided in bulk but missing in profile
+            const updateData: any = {};
+            if (row.email && !row.investor!.email) updateData.email = row.email;
+            if (row.phone && !row.investor!.phone) updateData.phone = row.phone;
+            if (Object.keys(updateData).length > 0) {
+              dbTransaction.update(investorRef, updateData);
+            }
           }
           
           let unitsToChange = 0;
@@ -220,7 +239,7 @@ export default function BulkTransactionModal({ isOpen, onClose, investors, accou
             units: Math.abs(unitsToChange),
             pricePerUnit: currentNav,
             totalAmount: amountToChange,
-            timestamp: new Date().toISOString()
+            timestamp: new Date(bulkDate).toISOString()
           });
         });
 
@@ -297,19 +316,35 @@ export default function BulkTransactionModal({ isOpen, onClose, investors, accou
               Upload a CSV, PDF, or image of a transaction receipt. Our AI will automatically extract the details.
             </p>
             
-            <div className="mb-8 w-full max-w-xs">
-              <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2 text-center">
-                Target Investment Account
-              </label>
-              <select 
-                value={selectedAccountId}
-                onChange={(e) => setSelectedAccountId(e.target.value)}
-                className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 transition-all"
-              >
-                {accounts.map(a => (
-                  <option key={a.id} value={a.id}>{a.name} ({a.ticker})</option>
-                ))}
-              </select>
+            <div className="grid grid-cols-2 gap-4 w-full max-w-lg mb-8">
+              <div className="space-y-2">
+                <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2 text-center">
+                  Investment Date
+                </label>
+                <div className="relative">
+                  <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-500"><Calendar className="w-4 h-4" /></span>
+                  <input 
+                    type="date"
+                    value={bulkDate}
+                    onChange={(e) => setBulkDate(e.target.value)}
+                    className="w-full bg-slate-800 border border-slate-700 rounded-xl pl-12 pr-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 transition-all text-sm"
+                  />
+                </div>
+              </div>
+              <div className="space-y-2">
+                <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2 text-center">
+                  Target Fund
+                </label>
+                <select 
+                  value={selectedAccountId}
+                  onChange={(e) => setSelectedAccountId(e.target.value)}
+                  className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 transition-all text-sm"
+                >
+                  {accounts.map(a => (
+                    <option key={a.id} value={a.id}>{a.name} ({a.ticker})</option>
+                  ))}
+                </select>
+              </div>
             </div>
 
             <input 
@@ -368,10 +403,10 @@ export default function BulkTransactionModal({ isOpen, onClose, investors, accou
               <table className="w-full text-left border-collapse">
                 <thead className="sticky top-0 bg-slate-900 z-10">
                   <tr className="border-b border-slate-800">
-                    <th className="px-4 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-wider">Investor Name</th>
+                    <th className="px-4 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-wider">Investor Details</th>
                     <th className="px-4 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-wider">Type</th>
-                    <th className="px-4 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-wider">Amount</th>
-                    <th className="px-4 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-wider">Status</th>
+                    <th className="px-4 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-wider text-right">Amount</th>
+                    <th className="px-4 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-wider text-center">Status</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-800/50">
@@ -384,11 +419,18 @@ export default function BulkTransactionModal({ isOpen, onClose, investors, accou
                             <span className="text-[8px] bg-blue-500/20 text-blue-400 px-1.5 py-0.5 rounded border border-blue-500/30 font-bold">NEW</span>
                           )}
                         </div>
-                        {row.investor && (
-                          <span className="text-[9px] font-mono text-emerald-500 bg-emerald-500/10 px-1 rounded border border-emerald-500/20">
-                            {row.investor.investorId}
-                          </span>
-                        )}
+                        <div className="flex items-center gap-2 mt-0.5">
+                          {row.investor && (
+                            <span className="text-[9px] font-mono text-emerald-500 bg-emerald-500/10 px-1 rounded border border-emerald-500/20">
+                              {row.investor.investorId}
+                            </span>
+                          )}
+                          {(row.email || row.phone) && (
+                            <span className="text-[9px] text-slate-500 italic">
+                              {[row.email, row.phone].filter(Boolean).join(' • ')}
+                            </span>
+                          )}
+                        </div>
                       </td>
                       <td className="px-4 py-3">
                         <span className={cn(
@@ -398,12 +440,12 @@ export default function BulkTransactionModal({ isOpen, onClose, investors, accou
                           {row.type}
                         </span>
                       </td>
-                      <td className="px-4 py-3">
+                      <td className="px-4 py-3 text-right">
                         <p className="text-sm text-white font-bold">
                           {formatCurrency(row.amount)}
                         </p>
                       </td>
-                      <td className="px-4 py-3">
+                      <td className="px-4 py-3 flex justify-center">
                         {row.status === 'valid' && <CheckCircle2 className="w-5 h-5 text-emerald-500" />}
                         {row.status === 'invalid' && (
                           <div className="flex items-center gap-2 text-red-500" title={row.error}>

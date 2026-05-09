@@ -1,11 +1,24 @@
 import { GoogleGenAI, Type } from "@google/genai";
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+let aiInstance: GoogleGenAI | null = null;
+
+function getAI() {
+  if (!aiInstance) {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      throw new Error("GEMINI_API_KEY is not defined. Please set it in the environment.");
+    }
+    aiInstance = new GoogleGenAI({ apiKey });
+  }
+  return aiInstance;
+}
 
 export interface ExtractedTransaction {
   name: string;
   type: 'BUY' | 'SELL';
   amount: number;
+  email?: string;
+  phone?: string;
   confidence: number;
   reasoning?: string;
 }
@@ -15,26 +28,24 @@ export async function processTransactionDocument(
   mimeType: string
 ): Promise<ExtractedTransaction[]> {
   try {
-    const response = await ai.models.generateContent({
+    const response = await getAI().models.generateContent({
       model: "gemini-3-flash-preview",
-      contents: {
-        parts: [
-          {
-            inlineData: {
-              data: base64Data,
-              mimeType: mimeType,
-            },
+      contents: [
+        {
+          inlineData: {
+            data: base64Data,
+            mimeType: mimeType,
           },
-          {
-            text: `Extract investment transaction details from this document. 
-            Look for investor names, transaction types (BUY/SELL/Subscription/Redemption), and amounts.
-            Return the data as a JSON array of objects.
-            If the document contains multiple transactions, extract all of them.
-            If a transaction type is 'Subscription' or 'Deposit', map it to 'BUY'.
-            If a transaction type is 'Redemption' or 'Withdrawal', map it to 'SELL'.`,
-          },
-        ],
-      },
+        },
+        {
+          text: `Extract investment transaction details from this document. 
+          Look for investor names, transaction types (BUY/SELL/Subscription/Redemption), amounts, and contact details (email, phone).
+          Return the data as a JSON array of objects.
+          If the document contains multiple transactions, extract all of them.
+          If a transaction type is 'Subscription' or 'Deposit', map it to 'BUY'.
+          If a transaction type is 'Redemption' or 'Withdrawal', map it to 'SELL'.`,
+        },
+      ],
       config: {
         responseMimeType: "application/json",
         responseSchema: {
@@ -54,6 +65,14 @@ export async function processTransactionDocument(
               amount: {
                 type: Type.NUMBER,
                 description: "The transaction amount in GHS.",
+              },
+              email: {
+                type: Type.STRING,
+                description: "The email address of the investor if found.",
+              },
+              phone: {
+                type: Type.STRING,
+                description: "The phone number of the investor if found.",
               },
               confidence: {
                 type: Type.NUMBER,

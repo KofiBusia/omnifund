@@ -9,7 +9,8 @@ import {
   Calendar, 
   ArrowUpDown,
   X,
-  Download
+  Download,
+  Edit3
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import Papa from 'papaparse';
@@ -20,6 +21,7 @@ interface TransactionHistoryProps {
   investors: Investor[];
   filterByAccountId?: string;
   filterByInvestorId?: string;
+  onEditTransaction?: (transaction: Transaction) => void;
   title?: string;
 }
 
@@ -32,6 +34,7 @@ export default function TransactionHistory({
   investors,
   filterByAccountId,
   filterByInvestorId,
+  onEditTransaction,
   title = "Transaction History"
 }: TransactionHistoryProps) {
   const [searchTerm, setSearchTerm] = useState('');
@@ -48,6 +51,17 @@ export default function TransactionHistory({
     const interval = setInterval(() => setTick(t => t + 1), 10000);
     return () => clearInterval(interval);
   }, []);
+
+  // Pre-calculate lookups for O(1) access mapping during render
+  const lookups = useMemo(() => {
+    const investorMap = new Map<string, Investor>();
+    const accountMap = new Map<string, InvestmentAccount>();
+    
+    investors.forEach(i => investorMap.set(i.id, i));
+    accounts.forEach(a => accountMap.set(a.id, a));
+    
+    return { investorMap, accountMap };
+  }, [investors, accounts]);
 
   const filteredAndSortedTransactions = useMemo(() => {
     let result = transactions.filter(t => {
@@ -70,8 +84,8 @@ export default function TransactionHistory({
       }
 
       // Search by investor name or account name
-      const investor = investors.find(i => i.id === t.investorId);
-      const account = accounts.find(a => a.id === t.accountId);
+      const investor = lookups.investorMap.get(t.investorId);
+      const account = lookups.accountMap.get(t.accountId);
       const searchMatch = 
         investor?.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
         account?.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -96,12 +110,12 @@ export default function TransactionHistory({
     });
 
     return result;
-  }, [transactions, searchTerm, typeFilter, accountFilter, dateRange, sortField, sortOrder, investors, accounts, filterByAccountId, filterByInvestorId]);
+  }, [transactions, searchTerm, typeFilter, accountFilter, dateRange, sortField, sortOrder, lookups, filterByAccountId, filterByInvestorId]);
 
   const handleExportCSV = () => {
     const exportData = filteredAndSortedTransactions.map(t => {
-      const investor = investors.find(i => i.id === t.investorId);
-      const account = accounts.find(a => a.id === t.accountId);
+      const investor = lookups.investorMap.get(t.investorId);
+      const account = lookups.accountMap.get(t.accountId);
       return {
         'Date': new Date(t.timestamp).toLocaleDateString(),
         'Time': new Date(t.timestamp).toLocaleTimeString(),
@@ -290,12 +304,13 @@ export default function TransactionHistory({
                   </div>
                 </th>
                 <th className="px-6 py-4 text-xs font-semibold text-slate-400 uppercase tracking-wider text-right">Price/Unit</th>
+                {onEditTransaction && <th className="px-6 py-4 text-xs font-semibold text-slate-400 uppercase tracking-wider text-right">Actions</th>}
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800">
               {filteredAndSortedTransactions.map((t) => {
-                const investor = investors.find(i => i.id === t.investorId);
-                const account = accounts.find(a => a.id === t.accountId);
+                const investor = lookups.investorMap.get(t.investorId);
+                const account = lookups.accountMap.get(t.accountId);
                 const isNew = (Date.now() - new Date(t.timestamp).getTime()) < 30000; // 30 seconds
                 
                 return (
@@ -350,6 +365,17 @@ export default function TransactionHistory({
                     <td className="px-6 py-4 text-right">
                       <span className="text-xs text-slate-500 font-medium">{formatCurrency(t.pricePerUnit)}</span>
                     </td>
+                    {onEditTransaction && (
+                      <td className="px-6 py-4 text-right">
+                        <button 
+                          onClick={() => onEditTransaction(t)}
+                          className="p-1.5 hover:bg-slate-700 rounded-lg text-slate-400 hover:text-emerald-500 transition-colors"
+                          title="Edit Transaction"
+                        >
+                          <Edit3 className="w-4 h-4" />
+                        </button>
+                      </td>
+                    )}
                   </motion.tr>
                 );
               })}

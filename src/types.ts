@@ -2,10 +2,12 @@ export interface InvestmentAccount {
   id: string;
   name: string;
   ticker: string;
+  isin?: string;
   description: string;
   aum: number;
   nav: number;
   totalUnits: number;
+  capacity?: number; // Max total units allowed
   cashBalance: number;
   lastValuationDate: string;
   createdAt: string;
@@ -17,10 +19,12 @@ export interface Investor {
   uid: string;
   accountId: string;
   name: string;
-  email: string;
+  email?: string;
+  phone?: string;
   unitsOwned: number;
   totalInvestment: number;
   currentValue: number;
+  kycStatus?: 'verified' | 'pending' | 'rejected';
 }
 
 export interface Transaction {
@@ -39,10 +43,14 @@ export interface Asset {
   accountId: string;
   ticker: string;
   name: string;
+  sector?: string; // e.g. Banking, Mining, Tech, Cash
   quantity: number;
-  costBasis: number;
+  costBasis: number; // Avg cost per share
+  totalCostBasis: number; // Total cost
   currentPrice: number;
   marketValue: number;
+  valuationDate?: string; // Date of acquisition or last valuation
+  unrealizedGainLoss?: number;
 }
 
 export interface UserRole {

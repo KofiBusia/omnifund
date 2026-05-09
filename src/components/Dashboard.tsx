@@ -1,5 +1,8 @@
+import { useMemo, useState } from 'react';
 import { InvestmentAccount, Investor, Asset, Valuation } from '../types';
 import { formatCurrency, cn } from '../lib/utils';
+import { toast } from 'sonner';
+import { reconcileAccountCash } from '../services/valuationService';
 import { 
   TrendingUp, 
   Users, 
@@ -7,7 +10,11 @@ import {
   PieChart as PieChartIcon,
   ArrowUpRight,
   ArrowDownRight,
-  Activity
+  Activity,
+  AlertCircle,
+  Wand2,
+  Table,
+  Loader2
 } from 'lucide-react';
 import { 
   BarChart, 
@@ -37,7 +44,30 @@ interface DashboardProps {
 const COLORS = ['#10b981', '#3b82f6', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899'];
 
 export default function Dashboard({ fund, investors, portfolio, valuations }: DashboardProps) {
-  const sortedValuations = [...valuations].sort((a, b) => (b.date?.seconds || 0) - (a.date?.seconds || 0));
+  const [isReconciling, setIsReconciling] = useState(false);
+
+  const handleFixBalance = async () => {
+    if (!fund || fund.cashBalance >= 0 || isReconciling) return;
+    
+    setIsReconciling(true);
+    const amountToInject = Math.abs(fund.cashBalance);
+    const loadingToast = toast.loading(`Injecting ${formatCurrency(amountToInject)} to cover negative balance...`);
+    
+    try {
+      await reconcileAccountCash(fund.id, amountToInject);
+      toast.success("Cash balance reconciled successfully", { id: loadingToast });
+    } catch (error: any) {
+      toast.error(`Reconciliation failed: ${error.message}`, { id: loadingToast });
+    } finally {
+      setIsReconciling(false);
+    }
+  };
+
+  const sortedValuations = useMemo(() => 
+    [...valuations].sort((a, b) => (b.date?.seconds || 0) - (a.date?.seconds || 0)),
+    [valuations]
+  );
+
   const latestValuation = sortedValuations[0];
   const previousValuation = sortedValuations[1];
 
@@ -46,15 +76,21 @@ export default function Dashboard({ fund, investors, portfolio, valuations }: Da
     return ((current - previous) / previous) * 100;
   };
 
-  const aumChange = latestValuation && previousValuation 
-    ? calculateChange(latestValuation.aum, previousValuation.aum) 
-    : 0;
+  const aumChange = useMemo(() => 
+    latestValuation && previousValuation 
+      ? calculateChange(latestValuation.aum, previousValuation.aum) 
+      : 0,
+    [latestValuation, previousValuation]
+  );
   
-  const navChange = latestValuation && previousValuation 
-    ? calculateChange(latestValuation.nav, previousValuation.nav) 
-    : 0;
+  const navChange = useMemo(() => 
+    latestValuation && previousValuation 
+      ? calculateChange(latestValuation.nav, previousValuation.nav) 
+      : 0,
+    [latestValuation, previousValuation]
+  );
 
-  const stats = [
+  const stats = useMemo(() => [
     { 
       label: 'AUM (Assets Under Management)', 
       value: fund?.aum ? formatCurrency(fund.aum) : 'GH₵0.00', 
@@ -77,8 +113,12 @@ export default function Dashboard({ fund, investors, portfolio, valuations }: Da
       label: 'Cash Balance', 
       value: fund?.cashBalance ? formatCurrency(fund.cashBalance) : 'GH₵0.00', 
       icon: DollarSign, 
-      color: 'text-amber-500',
-      bg: 'bg-amber-500/10'
+      color: fund?.cashBalance && fund.cashBalance < 0 ? 'text-red-500' : 'text-amber-500',
+      bg: fund?.cashBalance && fund.cashBalance < 0 ? 'bg-red-500/10' : 'bg-amber-500/10',
+      warning: fund?.cashBalance && fund.cashBalance < 0 ? 'Negative Cash' : null,
+      onAction: fund?.cashBalance && fund.cashBalance < 0 ? handleFixBalance : null,
+      actionIcon: Wand2,
+      actionLabel: 'Resolve'
     },
     { 
       label: 'Total Investors', 
@@ -94,25 +134,38 @@ export default function Dashboard({ fund, investors, portfolio, valuations }: Da
       color: 'text-purple-500',
       bg: 'bg-purple-500/10'
     },
-  ];
+  ], [fund?.aum, fund?.nav, fund?.cashBalance, aumChange, navChange, investors.length, portfolio.length]);
 
-  const chartData = portfolio.map(asset => ({
-    name: asset.ticker,
-    value: asset.marketValue
-  })).sort((a, b) => b.value - a.value).slice(0, 6);
+  const chartData = useMemo(() => {
+    const aggregated = new Map<string, number>();
+    portfolio.forEach(asset => {
+      aggregated.set(asset.ticker, (aggregated.get(asset.ticker) || 0) + asset.marketValue);
+    });
 
-  const performanceData = [...valuations].reverse().map(v => ({
-    date: v.date?.seconds ? new Date(v.date.seconds * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : 'N/A',
-    nav: v.nav,
-    aum: v.aum,
-    timestamp: v.date?.seconds || 0
-  })).sort((a, b) => a.timestamp - b.timestamp);
+    return Array.from(aggregated.entries())
+      .map(([name, value]) => ({ name, value }))
+      .sort((a, b) => b.value - a.value)
+      .slice(0, 6);
+  }, [portfolio]);
 
-  const allTimeHighNav = Math.max(...valuations.map(v => v.nav), 0);
-  const firstValuation = sortedValuations[sortedValuations.length - 1];
-  const totalReturn = firstValuation && latestValuation 
-    ? calculateChange(latestValuation.nav, firstValuation.nav) 
-    : 0;
+  const performanceData = useMemo(() => 
+    [...valuations].reverse().map(v => ({
+      date: v.date?.seconds ? new Date(v.date.seconds * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : 'N/A',
+      nav: v.nav,
+      aum: v.aum,
+      timestamp: v.date?.seconds || 0
+    })).sort((a, b) => a.timestamp - b.timestamp),
+    [valuations]
+  );
+
+  const allTimeHighNav = useMemo(() => Math.max(...valuations.map(v => v.nav), 0), [valuations]);
+  
+  const totalReturn = useMemo(() => {
+    const firstValuation = sortedValuations[sortedValuations.length - 1];
+    return firstValuation && latestValuation 
+      ? calculateChange(latestValuation.nav, firstValuation.nav) 
+      : 0;
+  }, [sortedValuations, latestValuation]);
 
   return (
     <div className="space-y-8">
@@ -122,9 +175,24 @@ export default function Dashboard({ fund, investors, portfolio, valuations }: Da
           <p className="text-slate-400 mt-1">Real-time fund performance and metrics</p>
         </div>
         <div className="text-right flex flex-col items-end">
-          <div className="flex items-center gap-2 mb-1">
-            <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
-            <span className="text-[10px] text-emerald-500 font-bold uppercase tracking-widest">Live Market Data</span>
+          <div className="flex items-center gap-3 mb-1">
+            <button 
+              onClick={handleFixBalance}
+              disabled={!fund || fund.cashBalance >= 0 || isReconciling}
+              className={cn(
+                "flex items-center gap-2 px-3 py-1 rounded-full text-[10px] font-bold uppercase transition-all",
+                fund && fund.cashBalance < 0 
+                  ? "bg-red-500 hover:bg-red-400 text-white animate-pulse" 
+                  : "bg-slate-800 text-slate-500 cursor-not-allowed"
+              )}
+            >
+              <AlertCircle className="w-3 h-3" />
+              {fund && fund.cashBalance < 0 ? `Fix Negative Cash (${formatCurrency(Math.abs(fund.cashBalance))})` : "Cash Balanced"}
+            </button>
+            <div className="flex items-center gap-2">
+              <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
+              <span className="text-[10px] text-emerald-500 font-bold uppercase tracking-widest">Live Market Data</span>
+            </div>
           </div>
           <p className="text-xs text-slate-500 uppercase font-semibold tracking-wider">Last Valuation</p>
           <p className="text-sm text-slate-300">{fund?.lastValuationDate ? new Date(fund.lastValuationDate).toLocaleString() : 'N/A'}</p>
@@ -139,13 +207,19 @@ export default function Dashboard({ fund, investors, portfolio, valuations }: Da
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: i * 0.1 }}
-            className="bg-slate-900 border border-slate-800 p-6 rounded-2xl shadow-sm"
+            className="bg-slate-900 border border-slate-800 p-6 rounded-2xl shadow-sm relative group"
           >
             <div className="flex items-start justify-between mb-4">
               <div className={`p-3 rounded-xl ${stat.bg}`}>
                 <stat.icon className={`w-6 h-6 ${stat.color}`} />
               </div>
               <div className="flex flex-col items-end gap-1">
+                {(stat as any).warning && (
+                  <div className="bg-red-500/10 text-red-500 px-2 py-0.5 rounded-full border border-red-500/20 text-[10px] font-bold uppercase flex items-center gap-1">
+                    <AlertCircle className="w-3 h-3" />
+                    {(stat as any).warning}
+                  </div>
+                )}
                 {stat.live && (
                   <div className="flex items-center gap-1.5 bg-emerald-500/10 text-emerald-500 px-2 py-0.5 rounded-full border border-emerald-500/20">
                     <div className="w-1 h-1 bg-emerald-500 rounded-full animate-pulse" />
@@ -163,8 +237,25 @@ export default function Dashboard({ fund, investors, portfolio, valuations }: Da
                 )}
               </div>
             </div>
-            <p className="text-slate-400 text-sm font-medium">{stat.label}</p>
-            <h3 className="text-2xl font-bold text-white mt-1">{stat.value}</h3>
+            <div className="flex items-end justify-between">
+              <div>
+                <p className="text-slate-400 text-sm font-medium">{stat.label}</p>
+                <h3 className="text-2xl font-bold text-white mt-1">{stat.value}</h3>
+              </div>
+              {(stat as any).onAction && (() => {
+                const ActionIcon = (stat as any).actionIcon;
+                return (
+                  <button 
+                    onClick={(stat as any).onAction}
+                    disabled={isReconciling}
+                    className="bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-800 text-white p-2 rounded-lg transition-all shadow-lg shadow-indigo-600/20 opacity-0 group-hover:opacity-100 flex items-center gap-2 text-[10px] font-bold uppercase"
+                  >
+                    {isReconciling ? <Loader2 className="w-3 h-3 animate-spin" /> : <ActionIcon className="w-3 h-3" />}
+                    {(stat as any).actionLabel}
+                  </button>
+                );
+              })()}
+            </div>
           </motion.div>
         ))}
       </div>
@@ -219,19 +310,23 @@ export default function Dashboard({ fund, investors, portfolio, valuations }: Da
             <ResponsiveContainer width="100%" height="100%">
               <AreaChart data={performanceData}>
                 <defs>
-                  <linearGradient id="colorAum" x1="0" y1="0" x2="0" y2="1">
+                  <linearGradient id={`colorAum-${fund?.ticker || 'default'}`} x1="0" y1="0" x2="0" y2="1">
                     <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.3}/>
                     <stop offset="95%" stopColor="#3b82f6" stopOpacity={0}/>
                   </linearGradient>
                 </defs>
                 <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
                 <XAxis 
-                  dataKey="date" 
+                  dataKey="timestamp" 
                   stroke="#64748b" 
                   fontSize={10} 
                   tickLine={false} 
                   axisLine={false}
                   minTickGap={30}
+                  tickFormatter={(val) => {
+                    const entry = performanceData.find(d => d.timestamp === val);
+                    return entry ? entry.date : '';
+                  }}
                 />
                 <YAxis 
                   stroke="#64748b" 
@@ -244,8 +339,12 @@ export default function Dashboard({ fund, investors, portfolio, valuations }: Da
                   contentStyle={{ backgroundColor: '#0f172a', border: '1px solid #1e293b', borderRadius: '8px' }}
                   itemStyle={{ color: '#3b82f6' }}
                   formatter={(value: number) => [formatCurrency(value), 'AUM']}
+                  labelFormatter={(val) => {
+                    const entry = performanceData.find(d => d.timestamp === val);
+                    return entry ? entry.date : '';
+                  }}
                 />
-                <Area type="monotone" dataKey="aum" stroke="#3b82f6" fillOpacity={1} fill="url(#colorAum)" strokeWidth={2} />
+                <Area type="monotone" dataKey="aum" stroke="#3b82f6" fillOpacity={1} fill={`url(#colorAum-${fund?.ticker || 'default'})`} strokeWidth={2} />
               </AreaChart>
             </ResponsiveContainer>
           </div>
@@ -267,12 +366,16 @@ export default function Dashboard({ fund, investors, portfolio, valuations }: Da
               <LineChart data={performanceData}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
                 <XAxis 
-                  dataKey="date" 
+                  dataKey="timestamp" 
                   stroke="#64748b" 
                   fontSize={10} 
                   tickLine={false} 
                   axisLine={false}
                   minTickGap={30}
+                  tickFormatter={(val) => {
+                    const entry = performanceData.find(d => d.timestamp === val);
+                    return entry ? entry.date : '';
+                  }}
                 />
                 <YAxis 
                   stroke="#64748b" 
@@ -286,6 +389,10 @@ export default function Dashboard({ fund, investors, portfolio, valuations }: Da
                   contentStyle={{ backgroundColor: '#0f172a', border: '1px solid #1e293b', borderRadius: '8px' }}
                   itemStyle={{ color: '#10b981' }}
                   formatter={(value: number) => [`GH₵${value.toFixed(4)}`, 'NAV']}
+                  labelFormatter={(val) => {
+                    const entry = performanceData.find(d => d.timestamp === val);
+                    return entry ? entry.date : '';
+                  }}
                 />
                 <Line 
                   type="monotone" 

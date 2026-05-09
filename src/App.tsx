@@ -1,4 +1,5 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
+import { Toaster } from 'sonner';
 import { 
   LayoutDashboard, 
   Users, 
@@ -11,7 +12,10 @@ import {
   ChevronRight,
   DollarSign,
   Briefcase,
-  FileText
+  FileText,
+  Activity,
+  RefreshCcw,
+  Cpu
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
@@ -46,6 +50,8 @@ import PortfolioManagement from './components/PortfolioManagement';
 import ValuationEngine from './components/ValuationEngine';
 import GeminiAssistant from './components/GeminiAssistant';
 import StatementModule from './components/StatementModule';
+import AnalyticsSuite from './components/AnalyticsSuite';
+import IngestionEngineUI from './components/IngestionEngineUI';
 import GlobalSearch from './components/GlobalSearch';
 
 export default function App() {
@@ -63,10 +69,27 @@ export default function App() {
   const [portfolio, setPortfolio] = useState<Asset[]>([]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [valuations, setValuations] = useState<Valuation[]>([]);
+  const [revertedValuations, setRevertedValuations] = useState<any[]>([]);
 
   // Derived active account (for simplicity, use the first one if none selected)
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
   const activeAccount = accounts.find(a => a.id === selectedAccountId) || accounts[0] || null;
+
+  // Memoized Data for Active Account
+  const activeInvestors = useMemo(() => 
+    investors.filter(i => i.accountId === activeAccount?.id),
+    [investors, activeAccount?.id]
+  );
+
+  const activePortfolio = useMemo(() => 
+    portfolio.filter(p => p.accountId === activeAccount?.id),
+    [portfolio, activeAccount?.id]
+  );
+
+  const activeValuations = useMemo(() => 
+    valuations.filter(v => v.accountId === activeAccount?.id),
+    [valuations, activeAccount?.id]
+  );
 
   // Background Valuation Service
   useEffect(() => {
@@ -136,8 +159,18 @@ export default function App() {
 
     const valuationsUnsub = onSnapshot(collection(db, 'valuations'), (snapshot) => {
       const data = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as Valuation));
-      setValuations(data.sort((a, b) => (b.date?.seconds || 0) - (a.date?.seconds || 0)));
+      // Sort: treat null dates (pending writes) as "now" (putting them at the top)
+      setValuations(data.sort((a, b) => {
+        const timeA = a.date?.seconds || Date.now() / 1000 + 1000; // Use future for pending
+        const timeB = b.date?.seconds || Date.now() / 1000 + 1000;
+        return timeB - timeA;
+      }));
     }, (error) => handleFirestoreError(error, OperationType.GET, 'valuations'));
+
+    const revertedUnsub = onSnapshot(collection(db, 'reverted_valuations'), (snapshot) => {
+      const data = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id }));
+      setRevertedValuations(data);
+    }, (error) => handleFirestoreError(error, OperationType.GET, 'reverted_valuations'));
 
     return () => {
       accountsUnsub();
@@ -145,6 +178,7 @@ export default function App() {
       portfolioUnsub();
       transactionsUnsub();
       valuationsUnsub();
+      revertedUnsub();
     };
   }, [user, role]);
 
@@ -201,6 +235,8 @@ export default function App() {
     { id: 'accounts', label: 'Accounts', icon: PieChart, roles: ['admin'] },
     { id: 'investors', label: 'Investors', icon: Users, roles: ['admin'] },
     { id: 'portfolio', label: 'Portfolio', icon: Briefcase, roles: ['admin', 'investor'] },
+    { id: 'analytics', label: 'Analytics', icon: Activity, roles: ['admin', 'investor'] },
+    { id: 'ingestion', label: 'Ingestion', icon: Cpu, roles: ['admin'] },
     { id: 'valuation', label: 'Valuation', icon: TrendingUp, roles: ['admin'] },
     { id: 'statements', label: 'Statements', icon: FileText, roles: ['admin', 'investor'] },
   ];
@@ -209,6 +245,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-200 flex">
+      <Toaster position="top-right" theme="dark" richColors />
       {/* Sidebar */}
       <motion.aside 
         initial={false}
@@ -315,9 +352,9 @@ export default function App() {
               {activeTab === 'dashboard' && (
                 <Dashboard 
                   fund={activeAccount} 
-                  investors={investors.filter(i => i.accountId === activeAccount?.id)} 
-                  portfolio={portfolio.filter(p => p.accountId === activeAccount?.id)}
-                  valuations={valuations.filter(v => v.accountId === activeAccount?.id)}
+                  investors={activeInvestors} 
+                  portfolio={activePortfolio}
+                  valuations={activeValuations}
                 />
               )}
               {activeTab === 'accounts' && <AccountManagement accounts={accounts} investors={investors} portfolio={portfolio} transactions={transactions} />}
@@ -331,13 +368,35 @@ export default function App() {
                   initialSearchTerm={globalSearchTerm}
                 />
               )}
-              {activeTab === 'portfolio' && <PortfolioManagement portfolio={portfolio} fund={activeAccount} accounts={accounts} />}
+              {activeTab === 'portfolio' && (
+                <PortfolioManagement 
+                  portfolio={portfolio} 
+                  fund={activeAccount} 
+                  accounts={accounts} 
+                  role={role}
+                />
+              )}
+              {activeTab === 'analytics' && (
+                <AnalyticsSuite 
+                  fund={activeAccount} 
+                  portfolio={activePortfolio}
+                  valuations={activeValuations}
+                />
+              )}
+              {activeTab === 'ingestion' && (
+                <IngestionEngineUI 
+                  accounts={accounts} 
+                  investors={investors} 
+                  onComplete={() => setActiveTab('dashboard')} 
+                />
+              )}
               {activeTab === 'valuation' && (
                 <ValuationEngine 
                   fund={activeAccount} 
-                  portfolio={portfolio.filter(p => p.accountId === activeAccount?.id)} 
-                  investors={investors.filter(i => i.accountId === activeAccount?.id)} 
-                  valuations={valuations.filter(v => v.accountId === activeAccount?.id)}
+                  portfolio={activePortfolio} 
+                  investors={activeInvestors} 
+                  valuations={activeValuations}
+                  revertedCount={revertedValuations.filter(rv => rv.accountId === activeAccount?.id).length}
                 />
               )}
               {activeTab === 'statements' && (
@@ -346,6 +405,7 @@ export default function App() {
                   accounts={accounts} 
                   transactions={transactions} 
                   valuations={valuations} 
+                  portfolio={portfolio}
                 />
               )}
             </motion.div>

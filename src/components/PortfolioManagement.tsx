@@ -1,6 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
+import { toast } from 'sonner';
 import { Asset, InvestmentAccount } from '../types';
 import { cn, formatCurrency } from '../lib/utils';
+import { getGeminiResponse } from '../lib/gemini';
 import { 
   Plus, 
   Search, 
@@ -9,10 +11,15 @@ import {
   DollarSign, 
   Trash2, 
   Edit3,
+  Calendar,
   RefreshCw,
   ArrowUpRight,
   ArrowDownRight,
-  Loader2
+  Loader2,
+  AlertCircle,
+  Table,
+  Sparkles,
+  X
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { addDoc, collection, doc, updateDoc, deleteDoc, runTransaction, increment } from 'firebase/firestore';
@@ -24,27 +31,83 @@ interface PortfolioManagementProps {
   portfolio: Asset[];
   fund: InvestmentAccount | null;
   accounts: InvestmentAccount[];
+  role?: 'admin' | 'investor' | null;
 }
 
-export default function PortfolioManagement({ portfolio, fund, accounts }: PortfolioManagementProps) {
+export default function PortfolioManagement({ portfolio, fund, accounts, role }: PortfolioManagementProps) {
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+  const [isBulkModalOpen, setIsBulkModalOpen] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [bulkInput, setBulkInput] = useState('');
+  const [isProcessingBulk, setIsProcessingBulk] = useState(false);
   const [localAccountId, setLocalAccountId] = useState<string | null>(fund?.id || (accounts.length > 0 ? accounts[0].id : null));
   
-  const filteredPortfolio = localAccountId 
-    ? portfolio.filter(p => p.accountId === localAccountId)
-    : portfolio;
+  // Initialize localAccountId when fund or accounts become available
+  React.useEffect(() => {
+    if (!localAccountId) {
+      const id = fund?.id || (accounts.length > 0 ? accounts[0].id : null);
+      if (id) setLocalAccountId(id);
+    }
+  }, [fund, accounts, localAccountId]);
 
-  const activeFund = accounts.find(a => a.id === localAccountId) || fund;
+  const activeFund = useMemo(() => 
+    accounts.find(a => a.id === localAccountId) || fund,
+    [accounts, localAccountId, fund]
+  );
+
+  const filteredPortfolio = useMemo(() => 
+    localAccountId 
+      ? portfolio.filter(p => p.accountId === localAccountId)
+      : portfolio,
+    [portfolio, localAccountId]
+  );
+
+  // Real-time Valuation Calculation (Derived from props)
+  const liveValuation = useMemo(() => {
+    if (!activeFund) return { aum: 0, nav: 1 };
+    const totalMarketValue = filteredPortfolio.reduce((sum, asset) => sum + asset.marketValue, 0);
+    const calculatedAUM = totalMarketValue + (activeFund.cashBalance || 0);
+    const calculatedNAV = activeFund.totalUnits > 0 ? calculatedAUM / activeFund.totalUnits : activeFund.nav;
+    
+    return {
+      aum: calculatedAUM,
+      nav: calculatedNAV
+    };
+  }, [filteredPortfolio, activeFund]);
 
   const [newAsset, setNewAsset] = useState({ 
     ticker: '', 
     name: '', 
+    sector: 'Banking',
     quantity: 0, 
-    costBasis: 0, 
+    costBasis: 0, // Avg per share
+    totalCostBasis: 0,
     currentPrice: 0,
+    marketValue: 0,
+    valuationDate: new Date().toISOString().split('T')[0],
     accountId: localAccountId || ''
   });
+
+  // Auto-calculate logic
+  const handleFinancialChange = (field: string, value: number) => {
+    setNewAsset(prev => {
+      const updated = { ...prev, [field]: value };
+      
+      if (field === 'quantity' || field === 'costBasis') {
+        updated.totalCostBasis = updated.quantity * updated.costBasis;
+      } else if (field === 'totalCostBasis' && updated.quantity > 0) {
+        updated.costBasis = updated.totalCostBasis / updated.quantity;
+      }
+
+      if (field === 'quantity' || field === 'currentPrice') {
+        updated.marketValue = updated.quantity * updated.currentPrice;
+      } else if (field === 'marketValue' && updated.quantity > 0) {
+        updated.currentPrice = updated.marketValue / updated.quantity;
+      }
+
+      return updated;
+    });
+  };
 
   // Update newAsset accountId when localAccountId changes
   React.useEffect(() => {
@@ -55,6 +118,73 @@ export default function PortfolioManagement({ portfolio, fund, accounts }: Portf
   const totalCostBasis = filteredPortfolio.reduce((sum, asset) => sum + (asset.quantity * asset.costBasis), 0);
   const totalGainLoss = totalMarketValue - totalCostBasis;
   const totalGainLossPct = totalCostBasis > 0 ? (totalGainLoss / totalCostBasis * 100) : 0;
+
+  const handleBulkImport = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!bulkInput.trim() || isProcessingBulk) return;
+
+    setIsProcessingBulk(true);
+    const loadingToast = toast.loading("AI is parsing your statement data...");
+
+    try {
+      const context = `
+        Target Account: ${activeFund?.name} (${activeFund?.ticker})
+        Assets to parse:
+        ${bulkInput}
+        
+        Expected Format: Instrument, Quantity, Cost Basis, Price.
+      `;
+      
+      const prompt = "Parse the provided statement data and return a JSON array of assets. For each asset, include: ticker, name, quantity (number), costBasis (number), currentPrice (number). Only return valid JSON.";
+      
+      const response = await getGeminiResponse(prompt, context);
+      const cleanedJson = response.replace(/```json/g, '').replace(/```/g, '').trim();
+      const assets = JSON.parse(cleanedJson);
+
+      if (!Array.isArray(assets)) throw new Error("Invalid output format from AI");
+
+      let totalCostToCover = 0;
+      await runTransaction(db, async (transaction) => {
+        assets.forEach(assetData => {
+          const assetRef = doc(collection(db, 'portfolio'));
+          const marketValue = assetData.quantity * assetData.currentPrice;
+          const cost = assetData.quantity * assetData.costBasis;
+          totalCostToCover += cost;
+
+          transaction.set(assetRef, {
+            accountId: activeFund?.id,
+            ticker: (assetData.ticker || 'UNKNOWN').toUpperCase(),
+            name: assetData.name || 'Unknown Asset',
+            sector: 'Mixed',
+            quantity: Number(assetData.quantity),
+            costBasis: Number(assetData.costBasis),
+            totalCostBasis: Number(cost),
+            currentPrice: Number(assetData.currentPrice),
+            marketValue: Number(marketValue),
+            valuationDate: new Date().toISOString(),
+            unrealizedGainLoss: Number(marketValue - cost)
+          });
+        });
+
+        // Deduct from cash
+        if (activeFund) {
+          const accountRef = doc(db, 'accounts', activeFund.id);
+          transaction.update(accountRef, {
+            cashBalance: increment(-totalCostToCover)
+          });
+        }
+      });
+
+      toast.success(`Successfully imported ${assets.length} assets.`, { id: loadingToast });
+      setIsBulkModalOpen(false);
+      setBulkInput('');
+    } catch (error: any) {
+      console.error("Bulk Import Error:", error);
+      toast.error(`Failed to parse data: ${error.message}`, { id: loadingToast });
+    } finally {
+      setIsProcessingBulk(false);
+    }
+  };
 
   const handleFetchPrices = async () => {
     setIsRefreshing(true);
@@ -67,27 +197,51 @@ export default function PortfolioManagement({ portfolio, fund, accounts }: Portf
     }
   };
 
+  const modalSelectedAccount = useMemo(() => 
+    accounts.find(a => a.id === newAsset.accountId) || activeFund,
+    [accounts, newAsset.accountId, activeFund]
+  );
+
+  const [isAdding, setIsAdding] = useState(false);
+
   const handleAddAsset = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const selectedAccount = accounts.find(a => a.id === newAsset.accountId) || fund;
-    if (!selectedAccount) return;
-
-    const totalCost = newAsset.quantity * newAsset.costBasis;
-
-    if (selectedAccount.cashBalance < totalCost) {
-      alert(`Insufficient cash in fund. Available: ${formatCurrency(selectedAccount.cashBalance)}`);
+    if (e) e.preventDefault();
+    if (isAdding) return;
+    
+    if (!modalSelectedAccount) {
+      toast.error("No investment account selected.");
       return;
     }
 
+    const totalCost = newAsset.totalCostBasis || (newAsset.quantity * newAsset.costBasis);
+
+    if (totalCost <= 0) {
+      toast.error("Please enter a valid amount.");
+      return;
+    }
+
+    setIsAdding(true);
+    const loadingToast = toast.loading("Recording portfolio investment...");
+
     try {
       await runTransaction(db, async (transaction) => {
-        const accountRef = doc(db, 'accounts', selectedAccount.id);
-        
-        // 1. Add asset
+        const accountRef = doc(db, 'accounts', modalSelectedAccount.id);
         const assetRef = doc(collection(db, 'portfolio'));
+        
+        const marketValue = newAsset.marketValue || (newAsset.quantity * newAsset.currentPrice);
+        
         transaction.set(assetRef, {
-          ...newAsset,
-          marketValue: newAsset.quantity * newAsset.currentPrice
+          accountId: modalSelectedAccount.id,
+          ticker: newAsset.ticker.trim().toUpperCase(),
+          name: newAsset.name.trim(),
+          sector: newAsset.sector,
+          quantity: Number(newAsset.quantity),
+          costBasis: Number(newAsset.costBasis),
+          totalCostBasis: Number(totalCost),
+          currentPrice: Number(newAsset.currentPrice),
+          marketValue: Number(marketValue),
+          valuationDate: newAsset.valuationDate || new Date().toISOString(),
+          unrealizedGainLoss: Number(marketValue - totalCost)
         });
 
         // 2. Deduct from cash balance
@@ -96,10 +250,23 @@ export default function PortfolioManagement({ portfolio, fund, accounts }: Portf
         });
       });
 
+      toast.success("Asset added to portfolio successfully", { id: loadingToast });
       setIsAddModalOpen(false);
-      setNewAsset({ ...newAsset, ticker: '', name: '', quantity: 0, costBasis: 0, currentPrice: 0 });
-    } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, 'portfolio');
+      setNewAsset({ 
+        ...newAsset, 
+        ticker: '', 
+        name: '', 
+        quantity: 0, 
+        costBasis: 0, 
+        totalCostBasis: 0,
+        currentPrice: 0,
+        marketValue: 0
+      });
+    } catch (error: any) {
+      console.error("Error in handleAddAsset:", error);
+      toast.error(`Failed to add asset: ${error.message || 'Unknown error'}`, { id: loadingToast });
+    } finally {
+      setIsAdding(false);
     }
   };
 
@@ -154,12 +321,21 @@ export default function PortfolioManagement({ portfolio, fund, accounts }: Portf
             Sync with afx.kwayisi.org
           </button>
           <button 
-            onClick={() => setIsAddModalOpen(true)}
-            className="bg-emerald-600 hover:bg-emerald-500 text-white px-6 py-3 rounded-xl font-semibold flex items-center gap-2 transition-all shadow-lg shadow-emerald-600/20"
+            onClick={() => setIsBulkModalOpen(true)}
+            className="bg-slate-800 hover:bg-slate-700 text-white px-6 py-3 rounded-xl font-semibold flex items-center gap-2 transition-all border border-slate-700"
           >
-            <Plus className="w-5 h-5" />
-            Add Asset
+            <Table className="w-5 h-5" />
+            Bulk Import
           </button>
+          {role === 'admin' && (
+            <button 
+              onClick={() => setIsAddModalOpen(true)}
+              className="bg-emerald-600 hover:bg-emerald-500 text-white px-6 py-3 rounded-xl font-semibold flex items-center gap-2 transition-all shadow-lg shadow-emerald-600/20"
+            >
+              <Plus className="w-5 h-5" />
+              Add Asset
+            </button>
+          )}
         </div>
       </div>
 
@@ -167,16 +343,16 @@ export default function PortfolioManagement({ portfolio, fund, accounts }: Portf
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
         <div className="bg-slate-900 border border-slate-800 p-6 rounded-2xl">
           <p className="text-slate-400 text-sm font-medium mb-1">AUM (Assets Under Management)</p>
-          <h3 className="text-2xl font-bold text-white">{formatCurrency(activeFund?.aum || totalMarketValue)}</h3>
+          <h3 className="text-2xl font-bold text-white">{formatCurrency(liveValuation.aum)}</h3>
           <div className="mt-2 flex items-center gap-1 text-emerald-500 text-xs font-medium">
             <TrendingUp className="w-3 h-3" />
-            <span>Fund Market Value</span>
+            <span>Real-time Market Value</span>
           </div>
         </div>
         <div className="bg-slate-900 border border-slate-800 p-6 rounded-2xl">
           <p className="text-slate-400 text-sm font-medium mb-1">NAV (Net Asset Value)</p>
-          <h3 className="text-2xl font-bold text-emerald-500">{formatCurrency(activeFund?.nav || 1.0000)}</h3>
-          <p className="text-xs text-slate-500 mt-2">Price per Unit</p>
+          <h3 className="text-2xl font-bold text-emerald-500">{formatCurrency(liveValuation.nav)}</h3>
+          <p className="text-xs text-slate-500 mt-2">Price per Unit (Calculated)</p>
         </div>
         <div className="bg-slate-900 border border-slate-800 p-6 rounded-2xl">
           <p className="text-slate-400 text-sm font-medium mb-1">Total Cost Basis</p>
@@ -209,6 +385,7 @@ export default function PortfolioManagement({ portfolio, fund, accounts }: Portf
           <thead>
             <tr className="bg-slate-800/50 border-b border-slate-800">
               <th className="px-6 py-4 text-xs font-semibold text-slate-400 uppercase tracking-wider">Asset</th>
+              <th className="px-6 py-4 text-xs font-semibold text-slate-400 uppercase tracking-wider">Sector</th>
               <th className="px-6 py-4 text-xs font-semibold text-slate-400 uppercase tracking-wider">Quantity</th>
               <th className="px-6 py-4 text-xs font-semibold text-slate-400 uppercase tracking-wider">Avg Cost</th>
               <th className="px-6 py-4 text-xs font-semibold text-slate-400 uppercase tracking-wider">Current Price</th>
@@ -243,6 +420,11 @@ export default function PortfolioManagement({ portfolio, fund, accounts }: Portf
                     </div>
                   </td>
                   <td className="px-6 py-4">
+                    <span className="text-xs font-semibold text-slate-400 bg-slate-800 px-2 py-1 rounded-full border border-slate-700">
+                      {asset.sector || 'Unclassified'}
+                    </span>
+                  </td>
+                  <td className="px-6 py-4">
                     <p className="text-sm text-slate-300 font-medium">{asset.quantity.toLocaleString()}</p>
                     <p className="text-xs text-slate-500">Shares</p>
                   </td>
@@ -253,13 +435,15 @@ export default function PortfolioManagement({ portfolio, fund, accounts }: Portf
                   <td className="px-6 py-4">
                     <div className="flex items-center gap-2">
                       <p className="text-sm text-white font-bold">{formatCurrency(asset.currentPrice)}</p>
-                      <button 
-                        onClick={() => handleUpdatePrice(asset.id, asset.currentPrice * (1 + (Math.random() * 0.04 - 0.02)))}
-                        className="p-1 hover:bg-slate-700 rounded text-slate-500 hover:text-emerald-500 transition-colors"
-                        title="Simulate Price Update"
-                      >
-                        <RefreshCw className="w-3 h-3" />
-                      </button>
+                      {role === 'admin' && (
+                        <button 
+                          onClick={() => handleUpdatePrice(asset.id, asset.currentPrice * (1 + (Math.random() * 0.04 - 0.02)))}
+                          className="p-1 hover:bg-slate-700 rounded text-slate-500 hover:text-emerald-500 transition-colors"
+                          title="Simulate Price Update"
+                        >
+                          <RefreshCw className="w-3 h-3" />
+                        </button>
+                      )}
                     </div>
                     <div className={cn(
                       "flex items-center gap-0.5 text-[10px] font-bold",
@@ -273,17 +457,19 @@ export default function PortfolioManagement({ portfolio, fund, accounts }: Portf
                     <p className="text-xs text-slate-500">Total Value</p>
                   </td>
                   <td className="px-6 py-4 text-right">
-                    <div className="flex items-center justify-end gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                      <button className="p-2 hover:bg-slate-700 rounded-lg text-slate-400 hover:text-white transition-colors">
-                        <Edit3 className="w-5 h-5" />
-                      </button>
-                      <button 
-                        onClick={() => deleteDoc(doc(db, 'portfolio', asset.id))}
-                        className="p-2 hover:bg-red-400/10 rounded-lg text-slate-400 hover:text-red-400 transition-colors"
-                      >
-                        <Trash2 className="w-5 h-5" />
-                      </button>
-                    </div>
+                    {role === 'admin' && (
+                      <div className="flex items-center justify-end gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <button className="p-2 hover:bg-slate-700 rounded-lg text-slate-400 hover:text-white transition-colors">
+                          <Edit3 className="w-5 h-5" />
+                        </button>
+                        <button 
+                          onClick={() => deleteDoc(doc(db, 'portfolio', asset.id))}
+                          className="p-2 hover:bg-red-400/10 rounded-lg text-slate-400 hover:text-red-400 transition-colors"
+                        >
+                          <Trash2 className="w-5 h-5" />
+                        </button>
+                      </div>
+                    )}
                   </td>
                 </motion.tr>
               );
@@ -329,6 +515,12 @@ export default function PortfolioManagement({ portfolio, fund, accounts }: Portf
                       <option key={acc.id} value={acc.id}>{acc.name} ({acc.ticker})</option>
                     ))}
                   </select>
+                  {modalSelectedAccount && modalSelectedAccount.cashBalance < (newAsset.totalCostBasis || (newAsset.quantity * newAsset.costBasis)) && (
+                    <div className="bg-amber-500/10 border border-amber-500/20 p-3 rounded-lg flex items-center gap-2 text-amber-500 text-xs font-bold">
+                      <AlertCircle className="w-4 h-4" />
+                      Warning: Insufficient Cash (Available: {formatCurrency(modalSelectedAccount.cashBalance)})
+                    </div>
+                  )}
                 </div>
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-2">
@@ -355,6 +547,23 @@ export default function PortfolioManagement({ portfolio, fund, accounts }: Portf
                   </div>
                 </div>
                 <div className="space-y-2">
+                  <label className="text-sm font-medium text-slate-400">Sector</label>
+                  <select 
+                    required
+                    value={newAsset.sector}
+                    onChange={(e) => setNewAsset({...newAsset, sector: e.target.value})}
+                    className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
+                  >
+                    <option value="Banking">Banking</option>
+                    <option value="Mining">Mining</option>
+                    <option value="Tech">Tech</option>
+                    <option value="Energy">Energy</option>
+                    <option value="Consumer">Consumer</option>
+                    <option value="Cash">Cash</option>
+                    <option value="Other">Other</option>
+                  </select>
+                </div>
+                <div className="space-y-2">
                   <label className="text-sm font-medium text-slate-400">Quantity</label>
                   <input 
                     required
@@ -367,28 +576,79 @@ export default function PortfolioManagement({ portfolio, fund, accounts }: Portf
                 </div>
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-2">
-                    <label className="text-sm font-medium text-slate-400">Avg Cost Basis (GH₵)</label>
+                    <label className="text-sm font-medium text-slate-400 uppercase tracking-wider text-[10px]">Avg Per Share (GH₵)</label>
                     <input 
-                      required
+                      type="number" 
+                      step="0.000001"
+                      value={newAsset.costBasis || ''}
+                      onChange={(e) => handleFinancialChange('costBasis', Number(e.target.value))}
+                      className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
+                      placeholder="0.0000"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium text-slate-400 uppercase tracking-wider text-[10px]">Total Cost Basis (GH₵)</label>
+                    <input 
                       type="number" 
                       step="0.01"
-                      value={newAsset.costBasis}
-                      onChange={(e) => setNewAsset({...newAsset, costBasis: Number(e.target.value)})}
+                      value={newAsset.totalCostBasis || ''}
+                      onChange={(e) => handleFinancialChange('totalCostBasis', Number(e.target.value))}
                       className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
                       placeholder="0.00"
                     />
                   </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-2">
-                    <label className="text-sm font-medium text-slate-400">Current Price (GH₵)</label>
+                    <label className="text-sm font-medium text-slate-400 uppercase tracking-wider text-[10px]">Current Price (GH₵)</label>
                     <input 
-                      required
+                      type="number" 
+                      step="0.000001"
+                      value={newAsset.currentPrice || ''}
+                      onChange={(e) => handleFinancialChange('currentPrice', Number(e.target.value))}
+                      className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
+                      placeholder="0.0000"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium text-slate-400 uppercase tracking-wider text-[10px]">Market Value (GH₵)</label>
+                    <input 
                       type="number" 
                       step="0.01"
-                      value={newAsset.currentPrice}
-                      onChange={(e) => setNewAsset({...newAsset, currentPrice: Number(e.target.value)})}
-                      className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
+                      value={newAsset.marketValue || ''}
+                      onChange={(e) => handleFinancialChange('marketValue', Number(e.target.value))}
+                      className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all font-bold text-emerald-400"
                       placeholder="0.00"
                     />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium text-slate-400 uppercase tracking-wider text-[10px]">Unrealized Gain/Loss</label>
+                    <div className={cn(
+                      "w-full bg-slate-800/50 border border-slate-700/50 rounded-xl px-4 py-3 text-sm font-bold flex items-center",
+                      (newAsset.marketValue - newAsset.totalCostBasis) >= 0 ? "text-emerald-500" : "text-red-500"
+                    )}>
+                      {formatCurrency(newAsset.marketValue - newAsset.totalCostBasis)}
+                      <span className="ml-auto text-[10px] opacity-70">
+                        {newAsset.totalCostBasis > 0 ? ((newAsset.marketValue - newAsset.totalCostBasis) / newAsset.totalCostBasis * 100).toFixed(2) : '0.00'}%
+                      </span>
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium text-slate-400 uppercase tracking-wider text-[10px]">Valuation Date</label>
+                    <div className="relative">
+                      <Calendar className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+                      <input 
+                        required
+                        type="date" 
+                        value={newAsset.valuationDate}
+                        onChange={(e) => setNewAsset({...newAsset, valuationDate: e.target.value})}
+                        className="w-full bg-slate-800 border border-slate-700 rounded-xl pl-11 pr-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
+                      />
+                    </div>
                   </div>
                 </div>
                 <div className="flex gap-4 pt-4">
@@ -401,9 +661,83 @@ export default function PortfolioManagement({ portfolio, fund, accounts }: Portf
                   </button>
                   <button 
                     type="submit"
-                    className="flex-1 py-3 px-4 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold rounded-xl transition-all shadow-lg shadow-emerald-600/20"
+                    disabled={isAdding}
+                    className="flex-1 py-3 px-4 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-800 disabled:text-slate-600 text-white font-semibold rounded-xl transition-all shadow-lg shadow-emerald-600/20 flex items-center justify-center gap-2"
                   >
-                    Add Asset
+                    {isAdding && <Loader2 className="w-4 h-4 animate-spin" />}
+                    {isAdding ? 'Adding...' : 'Add Asset'}
+                  </button>
+                </div>
+              </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+      
+      {/* Smart Bulk Import Modal */}
+      <AnimatePresence>
+        {isBulkModalOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsBulkModalOpen(false)}
+              className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm"
+            />
+            <motion.div 
+              initial={{ opacity: 0.95, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="relative w-full max-w-2xl bg-slate-900 border border-slate-800 rounded-3xl p-8 shadow-2xl"
+            >
+              <div className="flex items-center justify-between mb-6">
+                <div className="flex items-center gap-3">
+                  <div className="w-12 h-12 bg-indigo-500/20 rounded-2xl flex items-center justify-center">
+                    <Sparkles className="w-6 h-6 text-indigo-500" />
+                  </div>
+                  <div>
+                    <h3 className="text-2xl font-bold text-white">Smart Portfolio Import</h3>
+                    <p className="text-sm text-slate-500">Paste statement text, CSV, or formatted data and let Gemini parse it.</p>
+                  </div>
+                </div>
+                <button onClick={() => setIsBulkModalOpen(false)} className="p-2 hover:bg-slate-800 rounded-lg text-slate-500 transition-colors">
+                  <X className="w-6 h-6" />
+                </button>
+              </div>
+
+              <form onSubmit={handleBulkImport} className="space-y-6">
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-slate-400">Statement Content / CSV Data</label>
+                  <textarea 
+                    value={bulkInput}
+                    onChange={(e) => setBulkInput(e.target.value)}
+                    placeholder="Paste your asset list here (e.g. Scancom PLC, 1200 units, cost 3.33, price 3.87...)"
+                    className="w-full bg-slate-950/50 border border-slate-800 rounded-xl px-5 py-4 text-white focus:ring-2 focus:ring-indigo-500 outline-none transition-all h-64 font-mono text-sm resize-none"
+                    required
+                  />
+                </div>
+
+                <div className="bg-indigo-500/5 border border-indigo-500/20 p-4 rounded-xl flex gap-3 text-sm text-slate-400">
+                  <AlertCircle className="w-5 h-5 text-indigo-500 flex-shrink-0" />
+                  <p>Investment costs will be deducted from <b>{activeFund?.name}</b>'s cash balance. You can reconcile negative balances from the Dashboard.</p>
+                </div>
+
+                <div className="flex gap-4">
+                  <button 
+                    type="button"
+                    onClick={() => setIsBulkModalOpen(false)}
+                    className="flex-1 py-3 px-4 bg-slate-800 hover:bg-slate-700 text-white font-semibold rounded-xl transition-all"
+                  >
+                    Cancel
+                  </button>
+                  <button 
+                    type="submit"
+                    disabled={isProcessingBulk || !bulkInput.trim()}
+                    className="flex-1 py-3 px-4 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-800 disabled:text-slate-600 text-white font-semibold rounded-xl transition-all shadow-lg shadow-indigo-600/20 flex items-center justify-center gap-2"
+                  >
+                    {isProcessingBulk && <Loader2 className="w-5 h-5 animate-spin" />}
+                    {isProcessingBulk ? 'AI is Processing...' : 'Import Assets'}
                   </button>
                 </div>
               </form>
