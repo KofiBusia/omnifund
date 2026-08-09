@@ -1,1 +1,96 @@
 @import "tailwindcss";
+
+/* Light Theme Overrides for seamless application-wide theme switching */
+html.light, .light {
+  color-scheme: light;
+  background-color: #f8fafc;
+  color: #0f172a;
+}
+
+html.light .bg-slate-950,
+.light .bg-slate-950 {
+  background-color: #f8fafc !important;
+}
+
+html.light .bg-slate-900,
+.light .bg-slate-900 {
+  background-color: #ffffff !important;
+}
+
+html.light .bg-slate-900\/50,
+.light .bg-slate-900\/50,
+html.light .bg-slate-900\/80,
+.light .bg-slate-900\/80,
+html.light .bg-slate-900\/60,
+.light .bg-slate-900\/60 {
+  background-color: rgba(255, 255, 255, 0.9) !important;
+}
+
+html.light .bg-slate-950\/60,
+.light .bg-slate-950\/60,
+html.light .bg-slate-950\/80,
+.light .bg-slate-950\/80,
+html.light .bg-slate-950\/90,
+.light .bg-slate-950\/90 {
+  background-color: #f1f5f9 !important;
+}
+
+html.light .border-slate-800,
+.light .border-slate-800,
+html.light .border-slate-800\/80,
+.light .border-slate-800\/80,
+html.light .border-slate-800\/50,
+.light .border-slate-800\/50 {
+  border-color: #e2e8f0 !important;
+}
+
+html.light .border-slate-700,
+.light .border-slate-700 {
+  border-color: #cbd5e1 !important;
+}
+
+html.light .text-slate-400,
+.light .text-slate-400 {
+  color: #64748b !important;
+}
+
+html.light .text-slate-300,
+.light .text-slate-300 {
+  color: #334155 !important;
+}
+
+html.light .text-slate-200,
+.light .text-slate-200 {
+  color: #1e293b !important;
+}
+
+html.light .text-white,
+.light .text-white {
+  color: #0f172a !important;
+}
+
+html.light .hover\:bg-slate-800:hover,
+.light .hover\:bg-slate-800:hover,
+html.light .hover\:bg-slate-800\/60:hover,
+.light .hover\:bg-slate-800\/60:hover {
+  background-color: #f1f5f9 !important;
+}
+
+/* Retain white text inside active primary buttons and dark badges */
+html.light .bg-emerald-600,
+.light .bg-emerald-600,
+html.light .bg-emerald-500,
+.light .bg-emerald-500,
+html.light .bg-red-600,
+.light .bg-red-600 {
+  color: #ffffff !important;
+}
+
+html.light .bg-emerald-600 .text-white,
+.light .bg-emerald-600 .text-white,
+html.light .bg-emerald-500 .text-white,
+.light .bg-emerald-500 .text-white,
+html.light .bg-red-600 .text-white,
+.light .bg-red-600 .text-white {
+  color: #ffffff !important;
+}

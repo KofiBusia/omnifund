@@ -9,29 +9,49 @@ export interface DeleteDateResult {
   affectedAccountIds: string[];
 }
 
-export const isJuly21Transaction = (t: Transaction | any): boolean => {
-  if (!t || !t.timestamp) return false;
-  
+/**
+ * Checks if a transaction occurred on a given target date string (e.g. YYYY-MM-DD or MM/DD/YYYY).
+ */
+export const isTransactionOnDate = (t: Transaction | any, targetDateStr: string): boolean => {
+  if (!t || !t.timestamp || !targetDateStr) return false;
+
   const raw = String(t.timestamp);
-  if (raw.includes('2025-07-21') || raw.includes('07/21/2025')) {
-    return true;
+  const targetFormatted = targetDateStr.trim().split('T')[0]; // e.g. "2025-07-21"
+
+  if (raw.includes(targetFormatted)) return true;
+
+  // Format MM/DD/YYYY if target is YYYY-MM-DD
+  const parts = targetFormatted.split('-');
+  if (parts.length === 3) {
+    const mmddyyyy = `${parts[1]}/${parts[2]}/${parts[0]}`; // e.g. 07/21/2025
+    if (raw.includes(mmddyyyy)) return true;
+    const mddyyyy = `${parseInt(parts[1], 10)}/${parseInt(parts[2], 10)}/${parts[0]}`;
+    if (raw.includes(mddyyyy)) return true;
   }
 
+  // ISO string comparison
   const iso = safeISODate(t.timestamp);
-  if (iso === '2025-07-21') return true;
+  if (iso === targetFormatted) return true;
 
+  // JS Date object comparison
   const d = safeDate(t.timestamp);
   if (d) {
     const year = d.getFullYear();
     const month = String(d.getMonth() + 1).padStart(2, '0');
     const day = String(d.getDate()).padStart(2, '0');
-    if (`${year}-${month}-${day}` === '2025-07-21') return true;
+    if (`${year}-${month}-${day}` === targetFormatted) return true;
   }
 
   return false;
 };
 
-export const deleteJuly21Transactions = async (
+/**
+ * Batch delete all transactions recorded on a specified date (and optional account filter).
+ * Reconciles investor unit holdings, account cash balances, fund total units, AUM, and NAV.
+ */
+export const deleteTransactionsOnDate = async (
+  targetDateStr: string,
+  accountIdFilter?: string,
   localTransactions: Transaction[] = [],
   localInvestors: Investor[] = [],
   localAccounts: InvestmentAccount[] = []
@@ -42,7 +62,9 @@ export const deleteJuly21Transactions = async (
     affectedAccountIds: []
   };
 
-  // 1. Fetch fresh transactions directly from Firestore to ensure no missing state
+  if (!targetDateStr) return result;
+
+  // 1. Fetch fresh transactions directly from Firestore to ensure completeness
   let firestoreTxs: Transaction[] = [];
   try {
     const snap = await getDocs(collection(db, 'transactions'));
@@ -57,7 +79,11 @@ export const deleteJuly21Transactions = async (
   localTransactions.forEach(t => { if (t?.id) txMap.set(t.id, t); });
   firestoreTxs.forEach(t => { if (t?.id) txMap.set(t.id, t); });
 
-  const targetTxs = Array.from(txMap.values()).filter(isJuly21Transaction);
+  let targetTxs = Array.from(txMap.values()).filter(t => isTransactionOnDate(t, targetDateStr));
+
+  if (accountIdFilter && accountIdFilter !== 'ALL') {
+    targetTxs = targetTxs.filter(t => t.accountId === accountIdFilter);
+  }
 
   if (targetTxs.length === 0) {
     return result;
@@ -86,7 +112,6 @@ export const deleteJuly21Transactions = async (
         const accountRef = t.accountId ? doc(db, 'accounts', t.accountId) : null;
         const investorRef = t.investorId ? doc(db, 'investors', t.investorId) : null;
 
-        // Perform all reads first as required by Firestore transactions
         const accountSnap = accountRef ? await dbTx.get(accountRef) : null;
         const investorSnap = investorRef ? await dbTx.get(investorRef) : null;
 
@@ -155,3 +180,12 @@ export const deleteJuly21Transactions = async (
   result.affectedAccountIds = Array.from(affectedAccountsSet);
   return result;
 };
+
+// Backward compatibility helpers
+export const isJuly21Transaction = (t: Transaction | any): boolean => isTransactionOnDate(t, '2025-07-21');
+export const deleteJuly21Transactions = (
+  localTransactions: Transaction[] = [],
+  localInvestors: Investor[] = [],
+  localAccounts: InvestmentAccount[] = []
+): Promise<DeleteDateResult> => deleteTransactionsOnDate('2025-07-21', undefined, localTransactions, localInvestors, localAccounts);
+

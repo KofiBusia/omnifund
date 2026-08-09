@@ -72,11 +72,11 @@ service cloud.firestore {
       allow write: if isAdmin();
     }
 
-    // User Roles (Internal)
+    // User Roles & Profile Settings
     match /users/{userId} {
       allow read: if isSignedIn() && (isOwner(userId) || isAdmin());
       allow create: if isSignedIn() && (isOwner(userId) || isAdmin());
-      allow update: if isAdmin();
+      allow update: if isSignedIn() && (isOwner(userId) || isAdmin());
     }
   }
 }

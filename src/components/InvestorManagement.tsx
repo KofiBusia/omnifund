@@ -31,7 +31,8 @@ import {
   Building2,
   Filter,
   Trash2,
-  Sparkles
+  Sparkles,
+  CalendarX
 } from 'lucide-react';
 import { calculateSmartNavForDate, SmartNavResult } from '../services/smartNavEngine';
 import { motion, AnimatePresence } from 'motion/react';
@@ -42,7 +43,8 @@ import Papa from 'papaparse';
 import { toast } from 'sonner';
 
 import { cn, formatCurrency, safeDate, safeISODate, safeFormatDate, safeTimestamp } from '../lib/utils';
-import { isJuly21Transaction, deleteJuly21Transactions } from '../services/transactionCleanup';
+import { isJuly21Transaction } from '../services/transactionCleanup';
+import BatchDeleteByDateModal from './BatchDeleteByDateModal';
 import TransactionHistory from './TransactionHistory';
 import BulkTransactionModal from './BulkTransactionModal';
 import StatementModal from './StatementModal';
@@ -145,26 +147,11 @@ export default function InvestorManagement({
   const [mergeTargetId, setMergeTargetId] = useState<string>('');
   const [isMerging, setIsMerging] = useState(false);
   
-  const [isDeleteJuly21ModalOpen, setIsDeleteJuly21ModalOpen] = useState(false);
-  const [isDeletingJuly21, setIsDeletingJuly21] = useState(false);
+  const [isBatchDeleteModalOpen, setIsBatchDeleteModalOpen] = useState(false);
 
   const july21Transactions = useMemo(() => {
     return transactions.filter(isJuly21Transaction);
   }, [transactions]);
-
-  const handleDeleteJuly21 = async () => {
-    setIsDeletingJuly21(true);
-    const toastId = toast.loading(`Deleting ${july21Transactions.length || ''} 07/21/2025 transactions...`);
-    try {
-      const res = await deleteJuly21Transactions(transactions, investors, accounts);
-      toast.success(`Successfully deleted ${res.count} transaction(s) dated 07/21/2025 & reconciled balances!`, { id: toastId });
-      setIsDeleteJuly21ModalOpen(false);
-    } catch (err: any) {
-      toast.error(`Error deleting transactions: ${err?.message || 'Unknown error'}`, { id: toastId });
-    } finally {
-      setIsDeletingJuly21(false);
-    }
-  };
   const [editingInvestorForm, setEditingInvestorForm] = useState({
     name: '',
     email: '',
@@ -963,16 +950,19 @@ export default function InvestorManagement({
               <Upload className="w-4 h-4" />
               Bulk
             </button>
-            {july21Transactions.length > 0 && (
-              <button 
-                onClick={() => setIsDeleteJuly21ModalOpen(true)}
-                className="bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/30 px-4 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2 transition-all shadow-lg shadow-red-500/10"
-                title="Atomic batch delete all transactions recorded on 07/21/2025"
-              >
-                <Trash2 className="w-4 h-4 text-red-400" />
-                <span>Delete 07/21/2025 ({july21Transactions.length})</span>
-              </button>
-            )}
+            <button 
+              onClick={() => setIsBatchDeleteModalOpen(true)}
+              className="bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/30 px-4 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2 transition-all shadow-lg shadow-red-500/10"
+              title="Batch delete transactions recorded on a specific date"
+            >
+              <CalendarX className="w-4 h-4 text-red-400" />
+              <span>Delete by Date</span>
+              {july21Transactions.length > 0 && (
+                <span className="bg-red-500/30 text-red-300 text-[10px] px-1.5 py-0.5 rounded-full font-bold">
+                  07/21 ({july21Transactions.length})
+                </span>
+              )}
+            </button>
             <button 
               onClick={() => {
                 setNewInvestor(prev => ({
@@ -2424,84 +2414,15 @@ export default function InvestorManagement({
         isGmailConnected={isGmailConnected}
       />
 
-      {/* Delete 07/21/2025 Confirmation Dialog Modal */}
-      <AnimatePresence>
-        {isDeleteJuly21ModalOpen && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
-            <motion.div 
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.95 }}
-              className="bg-slate-900 border border-slate-800 rounded-2xl max-w-md w-full overflow-hidden shadow-2xl"
-            >
-              <div className="p-6 space-y-4">
-                <div className="flex items-center justify-between border-b border-slate-800 pb-4">
-                  <div className="flex items-center gap-3">
-                    <div className="p-2.5 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400">
-                      <AlertTriangle className="w-6 h-6" />
-                    </div>
-                    <div>
-                      <h3 className="text-xl font-bold text-white">Delete 07/21/2025 Transactions</h3>
-                      <p className="text-xs text-slate-400">1-Click Atomic Removal & Balance Reconciliation</p>
-                    </div>
-                  </div>
-                  <button 
-                    onClick={() => setIsDeleteJuly21ModalOpen(false)}
-                    className="text-slate-400 hover:text-white p-1 rounded-lg transition-colors"
-                  >
-                    <X className="w-5 h-5" />
-                  </button>
-                </div>
-
-                <div className="space-y-3 py-2 text-sm text-slate-300">
-                  <p>
-                    You are about to permanently delete <strong className="text-white font-mono">{july21Transactions.length} transaction(s)</strong> dated <span className="text-amber-400 font-semibold">07/21/2025</span>.
-                  </p>
-
-                  <div className="bg-slate-950/60 rounded-xl p-3.5 border border-slate-800/80 space-y-2 text-xs text-slate-400">
-                    <p className="font-semibold text-slate-200">Automated Atomic Reconciliation:</p>
-                    <ul className="list-disc pl-4 space-y-1 text-slate-400">
-                      <li>Matching transactions will be deleted from Firestore.</li>
-                      <li>Investor unit balances & total investment amounts will be adjusted.</li>
-                      <li>Account cash balances & total units will be restored.</li>
-                      <li>Fund AUM & NAV valuations will be recalculated automatically.</li>
-                    </ul>
-                  </div>
-                </div>
-
-                <div className="flex items-center justify-end gap-3 pt-4 border-t border-slate-800">
-                  <button 
-                    type="button"
-                    onClick={() => setIsDeleteJuly21ModalOpen(false)}
-                    disabled={isDeletingJuly21}
-                    className="px-4 py-2.5 rounded-xl text-sm font-semibold text-slate-300 hover:bg-slate-800 border border-slate-700 transition-all"
-                  >
-                    Cancel
-                  </button>
-                  <button 
-                    type="button"
-                    onClick={handleDeleteJuly21}
-                    disabled={isDeletingJuly21}
-                    className="px-5 py-2.5 rounded-xl text-sm font-semibold bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white flex items-center gap-2 transition-all shadow-lg shadow-red-600/20"
-                  >
-                    {isDeletingJuly21 ? (
-                      <>
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                        <span>Deleting & Reconciling...</span>
-                      </>
-                    ) : (
-                      <>
-                        <Trash2 className="w-4 h-4" />
-                        <span>Confirm & Delete All</span>
-                      </>
-                    )}
-                  </button>
-                </div>
-              </div>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
+      {/* Batch Delete By Date Modal */}
+      <BatchDeleteByDateModal 
+        isOpen={isBatchDeleteModalOpen}
+        onClose={() => setIsBatchDeleteModalOpen(false)}
+        transactions={transactions}
+        accounts={accounts}
+        investors={investors}
+        initialAccountId={selectedAccountId}
+      />
     </div>
   );
 }
