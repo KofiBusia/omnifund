@@ -18,7 +18,11 @@ import {
   Award,
   Zap,
   HelpCircle,
-  ChevronRight
+  ChevronRight,
+  Copy,
+  ExternalLink,
+  AlertTriangle,
+  Check
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
@@ -47,6 +51,7 @@ export default function LoginPage({ onSuccess }: LoginPageProps) {
   const [preferredRole, setPreferredRole] = useState<'admin' | 'investor'>('admin');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [copiedDomain, setCopiedDomain] = useState(false);
 
   // Helper to establish user document in Firestore with selected role
   const syncUserRole = async (uid: string, userEmail?: string | null, name?: string | null, forceRole?: 'admin' | 'investor') => {
@@ -84,7 +89,11 @@ export default function LoginPage({ onSuccess }: LoginPageProps) {
       if (onSuccess) onSuccess();
     } catch (error: any) {
       console.error('Google Sign In Error:', error);
-      if (error.code !== 'auth/popup-closed-by-user') {
+      if (error.code === 'auth/unauthorized-domain') {
+        const domain = window.location.hostname;
+        setErrorMessage(`auth/unauthorized-domain:${domain}`);
+        toast.error(`Google Sign-In blocked: Domain "${domain}" is not authorized in Firebase Console.`);
+      } else if (error.code !== 'auth/popup-closed-by-user') {
         setErrorMessage(error.message || 'Google sign-in failed. Please try again.');
         toast.error('Google sign-in failed');
       }
@@ -422,10 +431,83 @@ export default function LoginPage({ onSuccess }: LoginPageProps) {
             <motion.div 
               initial={{ opacity: 0, y: -10 }}
               animate={{ opacity: 1, y: 0 }}
-              className="bg-red-500/10 border border-red-500/30 text-red-400 text-xs p-3 rounded-xl flex items-start gap-2"
+              className="space-y-3"
             >
-              <HelpCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
-              <span>{errorMessage}</span>
+              {errorMessage.startsWith('auth/unauthorized-domain:') ? (
+                <div className="bg-amber-500/10 border border-amber-500/30 text-amber-300 rounded-2xl p-4 space-y-3 text-xs shadow-xl">
+                  <div className="flex items-start gap-2.5">
+                    <div className="p-2 rounded-xl bg-amber-500/20 text-amber-400 shrink-0 mt-0.5">
+                      <AlertTriangle className="w-5 h-5" />
+                    </div>
+                    <div className="space-y-1">
+                      <h4 className="font-extrabold text-white text-sm">Firebase Unauthorized Domain</h4>
+                      <p className="text-amber-200/90 leading-relaxed">
+                        Google Sign-In blocked this domain because it is not listed under Authorized Domains in your Firebase Console.
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Domain Copy Box */}
+                  <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-3 flex items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <span className="text-[10px] uppercase font-bold text-slate-500 block">Current Domain</span>
+                      <code className="text-emerald-400 font-mono font-bold truncate block">
+                        {errorMessage.replace('auth/unauthorized-domain:', '')}
+                      </code>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const domain = errorMessage.replace('auth/unauthorized-domain:', '');
+                        navigator.clipboard.writeText(domain);
+                        setCopiedDomain(true);
+                        toast.success(`Copied "${domain}" to clipboard!`);
+                        setTimeout(() => setCopiedDomain(false), 2000);
+                      }}
+                      className="px-3 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 font-bold flex items-center gap-1.5 shrink-0 transition-all border border-amber-500/30"
+                    >
+                      {copiedDomain ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                      <span>{copiedDomain ? 'Copied!' : 'Copy Domain'}</span>
+                    </button>
+                  </div>
+
+                  {/* Step by Step Fix */}
+                  <div className="bg-slate-950/40 rounded-xl p-3 border border-slate-800/80 space-y-1.5 text-slate-300">
+                    <p className="font-bold text-white text-[11px]">How to resolve in Firebase Console:</p>
+                    <ol className="list-decimal pl-4 space-y-1 text-[11px] text-slate-300">
+                      <li>Go to <a href="https://console.firebase.google.com/" target="_blank" rel="noreferrer" className="text-amber-400 underline font-semibold inline-flex items-center gap-0.5">Firebase Console <ExternalLink className="w-3 h-3" /></a></li>
+                      <li>Select project <strong className="text-white font-mono">ai-studio-23eab4e2...</strong></li>
+                      <li>Navigate to <strong>Authentication</strong> &gt; <strong>Settings</strong> &gt; <strong>Authorized domains</strong></li>
+                      <li>Click <strong>Add domain</strong> and paste <code className="text-amber-300 font-mono">{errorMessage.replace('auth/unauthorized-domain:', '')}</code></li>
+                    </ol>
+                  </div>
+
+                  {/* Immediate Bypass Options */}
+                  <div className="pt-1 flex flex-col sm:flex-row items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleDemoSignIn('admin')}
+                      className="w-full sm:w-1/2 py-2 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition-all shadow-md shadow-emerald-900/30"
+                    >
+                      <Zap className="w-3.5 h-3.5" />
+                      <span>Continue in Sandbox (Admin)</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAuthMode('email_login')}
+                      className="w-full sm:w-1/2 py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-bold text-xs flex items-center justify-center gap-1.5 transition-all"
+                    >
+                      <Mail className="w-3.5 h-3.5 text-slate-400" />
+                      <span>Use Email Sign-In</span>
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="bg-red-500/10 border border-red-500/30 text-red-400 text-xs p-3.5 rounded-xl flex items-start gap-2.5">
+                  <HelpCircle className="w-4 h-4 flex-shrink-0 mt-0.5 text-red-400" />
+                  <span>{errorMessage}</span>
+                </div>
+              )}
             </motion.div>
           )}
 
