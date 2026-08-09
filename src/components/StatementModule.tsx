@@ -252,6 +252,7 @@ export default function StatementModule({ investors, accounts, transactions, val
         investor={selectedInvestor}
         fund={accounts.find(a => a.id === selectedInvestor?.accountId) || accounts[0] || null}
         accounts={accounts}
+        investors={investors}
         transactions={transactions}
         valuations={valuations}
         isGmailConnected={isGmailConnected}

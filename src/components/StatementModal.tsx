@@ -21,11 +21,17 @@ import {
   HelpCircle,
   Award,
   BookOpen,
-  Sliders
+  Sliders,
+  Save,
+  Sparkles
 } from 'lucide-react';
+import { calculateSmartNavForDate } from '../services/smartNavEngine';
 import { Investor, InvestmentAccount, Transaction, Valuation } from '../types';
-import { formatCurrency, cn, safeDate, safeISODate, safeFormatDate, safeTimestamp } from '../lib/utils';
+import { formatCurrency, cn, safeDate, safeISODate, safeFormatDate, safeTimestamp, handleFirestoreError, OperationType } from '../lib/utils';
 import { generateStatementPDF } from '../lib/pdfGenerator';
+import { addDoc, collection, doc, updateDoc, deleteDoc, getDocs, query, where, serverTimestamp, writeBatch } from 'firebase/firestore';
+import { db } from '../firebase';
+import { toast } from 'sonner';
 
 interface StatementModalProps {
   isOpen: boolean;
@@ -36,6 +42,7 @@ interface StatementModalProps {
   transactions: Transaction[];
   valuations: Valuation[];
   isGmailConnected: boolean;
+  investors?: Investor[];
 }
 
 export default function StatementModal({ 
@@ -46,7 +53,8 @@ export default function StatementModal({
   accounts, 
   transactions, 
   valuations,
-  isGmailConnected
+  isGmailConnected,
+  investors = []
 }: StatementModalProps) {
   // Base Dates
   const [startDate, setStartDate] = useState(
@@ -93,7 +101,7 @@ export default function StatementModal({
     units: 1000
   });
 
-  // Re-synchronize when modal is opened
+  // Re-synchronize when modal is opened or selected investor changes
   useEffect(() => {
     if (isOpen && investor) {
       setCustomInvestorName(investor.name);
@@ -116,25 +124,35 @@ export default function StatementModal({
       setEditingTxId(null);
       setActivePanel('editor');
     }
-  }, [isOpen, investor, fund, transactions, accounts]);
+  }, [isOpen, investor?.id]);
 
-  // Handle auto-sync customNav from selected date / valuation engines
-  const handleSmartNavLookup = () => {
+  // Handle auto-sync customNav from selected date / portfolio valuation engine
+  const handleSmartNavLookup = async () => {
     if (!fund && !investor) return;
     const activeAccountId = investor?.accountId || fund?.id || '';
     if (!activeAccountId) return;
 
-    const targetDate = safeISODate(endDate);
-    const sortedVals = [...valuations]
-      .filter(v => v.accountId === activeAccountId)
-      .sort((a, b) => safeTimestamp(b.date) - safeTimestamp(a.date));
+    try {
+      const res = await calculateSmartNavForDate(activeAccountId, endDate, {
+        account: fund,
+        transactions,
+        valuations
+      });
+      setCustomNav(res.nav);
+      toast.success(`Smart NAV applied for ${safeFormatDate(endDate)}: ${formatCurrency(res.nav)}`);
+    } catch {
+      const targetDate = safeISODate(endDate);
+      const sortedVals = [...valuations]
+        .filter(v => v.accountId === activeAccountId)
+        .sort((a, b) => safeTimestamp(b.date) - safeTimestamp(a.date));
 
-    const match = sortedVals.find(v => {
-      return safeISODate(v.date) <= targetDate;
-    });
+      const match = sortedVals.find(v => {
+        return safeISODate(v.date) <= targetDate;
+      });
 
-    const fetchedNav = match?.nav || fund?.nav || 1.0000;
-    setCustomNav(fetchedNav);
+      const fetchedNav = match?.nav || fund?.nav || 1.0000;
+      setCustomNav(fetchedNav);
+    }
   };
 
   // Filter localTransactions between selected dates for presentation
@@ -291,6 +309,142 @@ export default function StatementModal({
     setManualClosingValue('');
     setIsAddingTx(false);
     setEditingTxId(null);
+  };
+
+  const [isSavingPortfolio, setIsSavingPortfolio] = useState(false);
+
+  // Save changes from Statement Workspace directly to Investor Portfolio & Firestore
+  const handleSavePortfolio = async () => {
+    if (!investor) {
+      toast.error("No active investor selected");
+      return;
+    }
+
+    setIsSavingPortfolio(true);
+    setErrorMessage(null);
+
+    try {
+      const activeAccountId = investor.accountId || fund?.id || (accounts[0]?.id || '');
+      const batch = writeBatch(db);
+
+      // 1. Sync Ledger Transactions in Firestore
+      const originalInvestorTxs = transactions.filter(t => t.investorId === investor.id);
+      const originalTxIds = new Set(originalInvestorTxs.map(t => t.id));
+      const currentTxIds = new Set(localTransactions.map(t => t.id));
+
+      // A. Delete transactions removed from statement workspace
+      for (const origTx of originalInvestorTxs) {
+        if (!currentTxIds.has(origTx.id)) {
+          batch.delete(doc(db, 'transactions', origTx.id));
+        }
+      }
+
+      // B. Add new or update existing transactions
+      for (const localTx of localTransactions) {
+        if (localTx.id.startsWith('temp_tx_')) {
+          // New transaction inserted in statement workspace
+          const newTxRef = doc(collection(db, 'transactions'));
+          batch.set(newTxRef, {
+            investorId: investor.id,
+            accountId: activeAccountId,
+            type: localTx.type,
+            totalAmount: Number(localTx.totalAmount) || 0,
+            pricePerUnit: Number(localTx.pricePerUnit) || 0,
+            units: Number(localTx.units) || 0,
+            timestamp: safeISODate(localTx.timestamp) || new Date().toISOString()
+          });
+        } else if (originalTxIds.has(localTx.id)) {
+          // Check if modified
+          const orig = originalInvestorTxs.find(t => t.id === localTx.id);
+          if (
+            orig &&
+            (orig.type !== localTx.type ||
+             orig.totalAmount !== localTx.totalAmount ||
+             orig.pricePerUnit !== localTx.pricePerUnit ||
+             orig.units !== localTx.units ||
+             orig.timestamp !== localTx.timestamp)
+          ) {
+            batch.update(doc(db, 'transactions', localTx.id), {
+              type: localTx.type,
+              totalAmount: Number(localTx.totalAmount) || 0,
+              pricePerUnit: Number(localTx.pricePerUnit) || 0,
+              units: Number(localTx.units) || 0,
+              timestamp: safeISODate(localTx.timestamp) || new Date().toISOString()
+            });
+          }
+        }
+      }
+
+      // 2. Update Investor Document in Firestore
+      const investorRef = doc(db, 'investors', investor.id);
+      batch.update(investorRef, {
+        name: customInvestorName || investor.name,
+        email: customInvestorEmail,
+        investorId: customInvestorId,
+        unitsOwned: Number(finalUnitsOwned) || 0,
+        currentValue: Number(finalClosingValue) || 0,
+        totalInvested: Number(finalTotalPurchaseAmount) || 0,
+        ...(activeAccountId ? { accountId: activeAccountId } : {})
+      });
+
+      // 3. Update Fund / Account Document & sibling investors if applicable
+      if (activeAccountId) {
+        const accountRef = doc(db, 'accounts', activeAccountId);
+        
+        const siblingInvestors = investors.filter(inv => inv.accountId === activeAccountId && inv.id !== investor.id);
+        const otherUnits = siblingInvestors.reduce((sum, inv) => sum + (inv.unitsOwned || 0), 0);
+        const updatedTotalUnits = otherUnits + (Number(finalUnitsOwned) || 0);
+        const updatedAum = updatedTotalUnits > 0 ? updatedTotalUnits * customNav : (fund?.aum || 0);
+
+        batch.update(accountRef, {
+          nav: customNav,
+          totalUnits: updatedTotalUnits,
+          aum: updatedAum,
+          lastValuationDate: new Date().toISOString()
+        });
+
+        // Sync currentValue for all sibling investors in this account to match new customNav
+        siblingInvestors.forEach(sibling => {
+          const sibRef = doc(db, 'investors', sibling.id);
+          batch.update(sibRef, {
+            currentValue: (sibling.unitsOwned || 0) * customNav
+          });
+        });
+      }
+
+      // Commit all changes in a single atomic Firestore batch operation
+      await batch.commit();
+
+      // 4. Record Valuation Entry Log
+      if (activeAccountId) {
+        const otherUnits = investors
+          .filter(inv => inv.accountId === activeAccountId && inv.id !== investor.id)
+          .reduce((sum, inv) => sum + (inv.unitsOwned || 0), 0);
+        const updatedTotalUnits = otherUnits + (Number(finalUnitsOwned) || 0);
+        const updatedAum = updatedTotalUnits > 0 ? updatedTotalUnits * customNav : (fund?.aum || 0);
+
+        try {
+          await addDoc(collection(db, 'valuations'), {
+            accountId: activeAccountId,
+            date: serverTimestamp(),
+            nav: customNav,
+            aum: updatedAum,
+            notes: `Statement Workspace Sync for ${customInvestorName}`
+          });
+        } catch (vErr) {
+          console.warn('Non-critical valuation log failed:', vErr);
+        }
+      }
+
+      toast.success(`Statement edits saved & synced to portfolio for ${customInvestorName}!`);
+    } catch (error) {
+      console.error('Error saving portfolio from statement workspace:', error);
+      handleFirestoreError(error, OperationType.WRITE, `investors/${investor.id}/statement_save`);
+      setErrorMessage(error instanceof Error ? error.message : 'Failed to save changes to portfolio');
+      toast.error('Failed to save statement updates to portfolio');
+    } finally {
+      setIsSavingPortfolio(false);
+    }
   };
 
   // Master PDF Download (passes edits without database sync)
@@ -453,6 +607,21 @@ export default function StatementModal({
                 
                 {/* Control Action Header */}
                 <div className="flex items-center gap-2">
+                  <button 
+                    onClick={handleSavePortfolio}
+                    disabled={isSavingPortfolio}
+                    title="Save statement changes directly to investor portfolio in database"
+                    className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-lg active:scale-95 transition-all disabled:opacity-50"
+                  >
+                    {isSavingPortfolio ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Save className="w-3.5 h-3.5" />
+                    )}
+                    <span className="hidden sm:inline">Save to Portfolio</span>
+                    <span className="sm:hidden">Save</span>
+                  </button>
+
                   <button 
                     onClick={handleReset}
                     title="Restore database values"
@@ -739,7 +908,23 @@ export default function StatementModal({
 
                       <div className="grid grid-cols-2 gap-3">
                         <div className="space-y-1">
-                          <label className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">Date</label>
+                          <div className="flex justify-between items-center">
+                            <label className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">Date</label>
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                const activeAccountId = investor?.accountId || fund?.id || '';
+                                if (!activeAccountId) return;
+                                const res = await calculateSmartNavForDate(activeAccountId, txForm.timestamp, { account: fund, transactions, valuations });
+                                handleFormPriceChange(res.nav);
+                                toast.success(`Smart NAV applied for ${safeFormatDate(txForm.timestamp)}: ${formatCurrency(res.nav)}`);
+                              }}
+                              className="text-[9px] text-emerald-400 hover:text-emerald-300 font-bold flex items-center gap-0.5"
+                              title="Smartly lookup account portfolio NAV as at this date"
+                            >
+                              <Sparkles className="w-2.5 h-2.5" /> Smart NAV
+                            </button>
+                          </div>
                           <input 
                             type="date" 
                             value={txForm.timestamp}
@@ -881,16 +1066,39 @@ export default function StatementModal({
               </div>
 
               {/* Left Workspace Footer (Actions Toolbar) */}
-              <div className="p-5 border-t border-slate-800 bg-slate-950/40 space-y-4">
+              <div className="p-5 border-t border-slate-800 bg-slate-950/40 space-y-3">
+                <button 
+                  onClick={handleSavePortfolio}
+                  disabled={isSavingPortfolio || isGenerating || emailStatus === 'sending'}
+                  className={cn(
+                    "w-full py-3 px-4 rounded-xl text-xs font-black uppercase tracking-wider flex items-center justify-center gap-2 transition-all shadow-xl select-none border border-emerald-500/30",
+                    isSavingPortfolio
+                      ? "bg-emerald-700/80 text-emerald-100 cursor-not-allowed"
+                      : "bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-600/20 active:scale-[0.98]"
+                  )}
+                >
+                  {isSavingPortfolio ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      Saving to Portfolio...
+                    </>
+                  ) : (
+                    <>
+                      <Save className="w-4 h-4" />
+                      Save & Sync to Portfolio
+                    </>
+                  )}
+                </button>
+
                 <div className="grid grid-cols-2 gap-3">
                   <button 
                     onClick={handleDownload}
-                    disabled={isGenerating || isSuccess || emailStatus === 'sending'}
+                    disabled={isGenerating || isSuccess || emailStatus === 'sending' || isSavingPortfolio}
                     className={cn(
-                      "py-3 rounded-xl text-xs font-black uppercase tracking-wider flex items-center justify-center gap-2 transition-all shadow-lg select-none",
+                      "py-2.5 rounded-xl text-xs font-black uppercase tracking-wider flex items-center justify-center gap-2 transition-all shadow-lg select-none border border-slate-700/50",
                       isSuccess 
                         ? "bg-emerald-500 text-white" 
-                        : "bg-emerald-600 hover:bg-emerald-500 text-white"
+                        : "bg-slate-800 hover:bg-slate-700 text-white"
                     )}
                   >
                     {isGenerating ? (

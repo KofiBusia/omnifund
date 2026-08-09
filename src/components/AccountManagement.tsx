@@ -38,6 +38,7 @@ import BulkTransactionModal from './BulkTransactionModal';
 import FundStatementModal from './FundStatementModal';
 import AIAccountAuditor from './AIAccountAuditor';
 import AIAccountChat from './AIAccountChat';
+import AccountWorkspaceModal from './AccountWorkspaceModal';
 import { toast } from 'sonner';
 import Papa from 'papaparse';
 import { IngestionEngine, IngestionResult } from '../services/ingestionService';
@@ -64,6 +65,7 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
   const [isBulkModalOpen, setIsBulkModalOpen] = useState(false);
   const [isAIAuditorOpen, setIsAIAuditorOpen] = useState(false);
   const [selectedAccountForAI, setSelectedAccountForAI] = useState<InvestmentAccount | null>(null);
+  const [selectedAccountForWorkspace, setSelectedAccountForWorkspace] = useState<InvestmentAccount | null>(null);
   const [selectedAccountForHistory, setSelectedAccountForHistory] = useState<InvestmentAccount | null>(null);
   const [selectedAccountForStatement, setSelectedAccountForStatement] = useState<InvestmentAccount | null>(null);
   const [accountToDelete, setAccountToDelete] = useState<string | null>(null);
@@ -826,9 +828,9 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
                       <Trash2 className="w-5 h-5" />
                     </button>
                     <button 
-                      onClick={() => {
-                        setEditingAccount(account);
-                        setIsEditModalOpen(true);
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setSelectedAccountForWorkspace(account);
                       }}
                       className="flex items-center gap-2 text-emerald-500 text-sm font-bold hover:gap-3 transition-all"
                     >
@@ -920,7 +922,7 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
                 </div>
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-2">
-                    <label className="text-sm font-medium text-slate-400">NAV (GH₵)</label>
+                    <label className="text-sm font-medium text-slate-400">NAV per Unit (GH₵)</label>
                     <input 
                       required
                       type="number" 
@@ -1027,7 +1029,7 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
                 </div>
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-2">
-                    <label className="text-sm font-medium text-slate-400">Initial NAV (GH₵)</label>
+                    <label className="text-sm font-medium text-slate-400">Initial NAV per Unit (GH₵)</label>
                     <input 
                       required
                       type="number" 
@@ -1057,7 +1059,7 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
                     value={newAccount.totalUnits.toLocaleString(undefined, { maximumFractionDigits: 4 })}
                     className="w-full bg-slate-800/50 border border-slate-700 rounded-xl px-4 py-3 text-slate-400 cursor-not-allowed outline-none transition-all font-mono"
                   />
-                  <p className="text-[10px] text-slate-500 italic">Automatically calculated as AUM / NAV</p>
+                  <p className="text-[10px] text-slate-500 italic">Total Units = Initial AUM ÷ Initial NAV per Unit</p>
                 </div>
                          <div className="bg-blue-500/5 border border-blue-500/20 p-4 rounded-2xl flex flex-col gap-4">
                   <div className="flex gap-3">
@@ -1491,6 +1493,74 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
               </form>
             </motion.div>
           </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {selectedAccountForWorkspace && (
+          <AccountWorkspaceModal
+            isOpen={!!selectedAccountForWorkspace}
+            onClose={() => setSelectedAccountForWorkspace(null)}
+            account={selectedAccountForWorkspace}
+            investors={investors}
+            portfolio={portfolio}
+            valuations={valuations}
+            transactions={transactions}
+            onUpdateAccount={async (updatedAccount) => {
+              try {
+                const accountRef = doc(db, 'accounts', updatedAccount.id);
+                const calculatedAum = updatedAccount.totalUnits > 0 ? updatedAccount.totalUnits * updatedAccount.nav : updatedAccount.aum;
+                
+                await updateDoc(accountRef, {
+                  name: updatedAccount.name,
+                  ticker: updatedAccount.ticker,
+                  description: updatedAccount.description,
+                  nav: updatedAccount.nav,
+                  aum: calculatedAum,
+                  totalUnits: updatedAccount.totalUnits,
+                  cashBalance: updatedAccount.cashBalance,
+                  lastValuationDate: new Date().toISOString()
+                });
+
+                // Update all investors belonging to this account with new NAV
+                const invQuery = query(collection(db, 'investors'), where('accountId', '==', updatedAccount.id));
+                const invSnap = await getDocs(invQuery);
+                const invUpdates = invSnap.docs.map(d => {
+                  const invData = d.data();
+                  return updateDoc(doc(db, 'investors', d.id), {
+                    currentValue: (invData.unitsOwned || 0) * updatedAccount.nav
+                  });
+                });
+                await Promise.all(invUpdates);
+
+                // Add valuation log entry
+                await addDoc(collection(db, 'valuations'), {
+                  accountId: updatedAccount.id,
+                  date: serverTimestamp(),
+                  nav: updatedAccount.nav,
+                  aum: calculatedAum,
+                  notes: 'Price per Unit (NAV) updated via Account Parameters'
+                });
+
+                setSelectedAccountForWorkspace({ ...updatedAccount, aum: calculatedAum });
+                toast.success(`Parameters for "${updatedAccount.name}" updated successfully! Price per unit: GH₵${updatedAccount.nav.toFixed(4)}`);
+              } catch (err: any) {
+                toast.error(`Error updating account: ${err.message}`);
+              }
+            }}
+            onOpenStatement={(acc) => {
+              setSelectedAccountForStatement(acc);
+              setIsFundModalOpen(true);
+            }}
+            onOpenHistory={(acc) => {
+              setSelectedAccountForHistory(acc);
+              setIsHistoryModalOpen(true);
+            }}
+            onOpenAI={(acc) => {
+              setSelectedAccountForAI(acc);
+              setIsAIAuditorOpen(true);
+            }}
+          />
         )}
       </AnimatePresence>
     </div>

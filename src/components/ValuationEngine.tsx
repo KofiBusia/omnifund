@@ -15,9 +15,12 @@ import {
   Plus,
   Minus,
   RotateCcw,
-  Trash2
+  Trash2,
+  Send,
+  UploadCloud
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { toast } from 'sonner';
 import { handleFirestoreError, OperationType } from '../lib/utils';
 
 import { cn, formatCurrency } from '../lib/utils';
@@ -48,6 +51,7 @@ export default function ValuationEngine({ fund, portfolio, investors, valuations
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [valMethod, setValMethod] = useState<'automated' | 'manual'>('automated');
   const [manualGain, setManualGain] = useState<string>('');
+  const [targetPricePerUnit, setTargetPricePerUnit] = useState<string>('');
   const [manualDate, setManualDate] = useState<string>(new Date().toISOString().split('T')[0]);
   const [gainLossPct, setGainLossPct] = useState<string>('');
   const [selectedAssetId, setSelectedAssetId] = useState<string>('all');
@@ -70,10 +74,27 @@ export default function ValuationEngine({ fund, portfolio, investors, valuations
   const totalUnits = investors.reduce((sum, inv) => sum + inv.unitsOwned, 0);
   
   const gainValue = parseFloat(manualGain) || 0;
+
+  const handleTargetNavChange = (targetNavStr: string) => {
+    setTargetPricePerUnit(targetNavStr);
+    if (!targetNavStr || isNaN(parseFloat(targetNavStr))) {
+      setManualGain('');
+      setGainLossPct('');
+      return;
+    }
+    const targetNavVal = parseFloat(targetNavStr);
+    const requiredAum = totalUnits > 0 ? totalUnits * targetNavVal : totalMarketValue + (fund?.cashBalance || 0);
+    const requiredGain = requiredAum - (totalMarketValue + (fund?.cashBalance || 0));
+    setManualGain(requiredGain.toFixed(2));
+    if (totalMarketValue > 0) {
+      setGainLossPct(((requiredGain / totalMarketValue) * 100).toFixed(2));
+    }
+  };
   
   // Calculate gain based on percentage if provided
   const handlePctChange = (pct: string) => {
     setGainLossPct(pct);
+    setTargetPricePerUnit('');
     if (!pct) {
       setManualGain('');
       return;
@@ -84,6 +105,7 @@ export default function ValuationEngine({ fund, portfolio, investors, valuations
 
   const handleGainChange = (gain: string) => {
     setManualGain(gain);
+    setTargetPricePerUnit('');
     if (!gain || totalMarketValue === 0) {
       setGainLossPct('');
       return;
@@ -94,6 +116,7 @@ export default function ValuationEngine({ fund, portfolio, investors, valuations
 
   const handlePriceChange = (price: string) => {
     setNewAssetPrice(price);
+    setTargetPricePerUnit('');
     if (!price || !selectedAsset) {
       setManualGain('');
       setGainLossPct('');
@@ -106,22 +129,38 @@ export default function ValuationEngine({ fund, portfolio, investors, valuations
     setGainLossPct(pct.toFixed(2));
   };
 
-  const projectAum = totalMarketValue + (fund?.cashBalance || 0) + (valMethod === 'manual' ? gainValue : 0);
-  const calculatedNAV = totalUnits > 0 ? projectAum / totalUnits : (fund?.nav || 1.0000);
+  const targetNavNumber = parseFloat(targetPricePerUnit);
+  const calculatedNAV = targetNavNumber > 0 
+    ? targetNavNumber 
+    : (totalUnits > 0 ? (totalMarketValue + (fund?.cashBalance || 0) + (valMethod === 'manual' ? gainValue : 0)) / totalUnits : (fund?.nav || 1.0000));
+  
+  const projectAum = totalUnits > 0 
+    ? totalUnits * calculatedNAV 
+    : (totalMarketValue + (fund?.cashBalance || 0) + (valMethod === 'manual' ? gainValue : 0));
   
   const runValuation = async () => {
-    if (!fund) return;
+    if (!fund) {
+      toast.error("Please select an active fund/account first.");
+      return;
+    }
     setIsCalculating(true);
     setLastResult(null);
     
     try {
-      if (valMethod === 'automated') {
+      if (valMethod === 'automated' && !targetPricePerUnit) {
         await runGlobalValuation();
-        setLastResult({ nav: calculatedNAV, aum: projectAum });
+        // Also run for specific fund to guarantee complete update and return result
+        const result = await runManualValuation(fund.id, 0, 'Automated Real-time Market Valuation');
+        if (result) {
+          setLastResult(result);
+          toast.success(`Valuation published for "${fund.name}"! Price per unit: GH₵${result.nav.toFixed(4)}`);
+        }
       } else {
-        const notes = selectedAssetId !== 'all' 
-          ? `Manual valuation for ${selectedAsset?.ticker}. New Price: ${newAssetPrice || 'N/A'}. Gain/Loss: ${gainLossPct}%`
-          : `Manual valuation adjustment. Gain/Loss: ${gainLossPct}%`;
+        const notes = targetPricePerUnit 
+          ? `Direct Published Price per Unit (NAV): GH₵${targetPricePerUnit}`
+          : selectedAssetId !== 'all' 
+            ? `Manual valuation for ${selectedAsset?.ticker}. New Price: ${newAssetPrice || 'N/A'}. Gain/Loss: ${gainLossPct}%`
+            : `Manual valuation adjustment. Gain/Loss: ${gainLossPct}%`;
           
         const assetUpdate = selectedAssetId !== 'all' && newAssetPrice 
           ? { id: selectedAssetId, newPrice: parseFloat(newAssetPrice) }
@@ -132,21 +171,24 @@ export default function ValuationEngine({ fund, portfolio, investors, valuations
           gainValue, 
           notes, 
           manualDate, 
-          assetUpdate
+          assetUpdate,
+          targetPricePerUnit ? parseFloat(targetPricePerUnit) : undefined
         );
         if (result) {
           setLastResult(result);
+          toast.success(`Valuation published for "${fund.name}"! Price per unit: GH₵${result.nav.toFixed(4)}`);
           setManualGain('');
+          setTargetPricePerUnit('');
           setGainLossPct('');
           setNewAssetPrice('');
           setSelectedAssetId('all');
         }
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error(error);
-      alert('Error publishing valuation. Please check logs.');
+      toast.error('Error publishing valuation: ' + (error?.message || 'Please check logs'));
     } finally {
-      setTimeout(() => setIsCalculating(false), 1500);
+      setTimeout(() => setIsCalculating(false), 1000);
     }
   };
 
@@ -284,20 +326,20 @@ export default function ValuationEngine({ fund, portfolio, investors, valuations
 
         <button 
           onClick={runValuation}
-          disabled={isCalculating}
+          disabled={isCalculating || !fund}
           className={cn(
-            "px-8 py-4 rounded-xl font-bold flex items-center gap-3 transition-all shadow-xl whitespace-nowrap",
+            "px-8 py-4 rounded-xl font-bold flex items-center gap-3 transition-all shadow-xl whitespace-nowrap text-sm",
             isCalculating 
-              ? "bg-slate-800 text-slate-500 cursor-not-allowed" 
-              : "bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-600/20"
+              ? "bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-700" 
+              : "bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-600/30 active:scale-[0.98]"
           )}
         >
           {isCalculating ? (
-            <RefreshCw className="w-6 h-6 animate-spin" />
+            <RefreshCw className="w-5 h-5 animate-spin" />
           ) : (
-            <Calculator className="w-6 h-6" />
+            <Send className="w-5 h-5" />
           )}
-          {isCalculating ? 'Processing Valuation...' : valMethod === 'manual' ? 'Publish Manual Valuation' : 'Run Fund Valuation'}
+          {isCalculating ? 'Publishing Valuation...' : 'Publish Valuation'}
         </button>
       </div>
 
@@ -377,6 +419,24 @@ export default function ValuationEngine({ fund, portfolio, investors, valuations
                     </motion.div>
                   )}
 
+                  <div className="space-y-2 p-3 bg-emerald-500/5 border border-emerald-500/20 rounded-2xl">
+                    <label className="text-[10px] font-bold text-emerald-400 uppercase tracking-wider flex items-center justify-between">
+                      <span>Direct Published Price per Unit (NAV)</span>
+                      <span className="text-[9px] text-slate-500 font-normal">e.g. 0.27</span>
+                    </label>
+                    <div className="relative group">
+                      <span className="absolute left-4 top-1/2 -translate-y-1/2 text-sm font-bold text-emerald-500">GH₵</span>
+                      <input 
+                        type="number"
+                        step="0.0001"
+                        value={targetPricePerUnit}
+                        onChange={(e) => handleTargetNavChange(e.target.value)}
+                        placeholder="e.g. 0.2700"
+                        className="w-full bg-slate-950 border border-emerald-500/30 rounded-xl py-3 pl-12 pr-4 text-base font-black text-white focus:outline-none focus:border-emerald-500 transition-all placeholder:text-slate-700"
+                      />
+                    </div>
+                  </div>
+
                   <div className="grid grid-cols-2 gap-4">
                     <div className="space-y-2">
                       <label className="text-[10px] font-bold text-slate-500 uppercase">Gain/Loss Amount</label>
@@ -442,12 +502,39 @@ export default function ValuationEngine({ fund, portfolio, investors, valuations
                 </div>
               </div>
 
-              <div className="bg-emerald-500/5 border border-emerald-500/20 p-6 rounded-2xl text-center">
-                <p className="text-emerald-500 text-[10px] font-bold uppercase tracking-widest mb-1">Projected NAV</p>
+              <div className="bg-emerald-500/5 border border-emerald-500/20 p-6 rounded-2xl text-center space-y-2">
+                <p className="text-emerald-500 text-[10px] font-bold uppercase tracking-widest">Projected Price per Unit (NAV)</p>
                 <h4 className="text-4xl font-black text-white tracking-tight">
                   {formatCurrency(calculatedNAV)}
                 </h4>
+                <p className="text-[11px] text-slate-400 font-medium pt-1">
+                  Total Fund AUM: <span className="font-bold text-white">{formatCurrency(projectAum)}</span>
+                </p>
               </div>
+
+              <button
+                type="button"
+                onClick={runValuation}
+                disabled={isCalculating || !fund}
+                className={cn(
+                  "w-full py-4 px-6 rounded-2xl font-black text-base flex items-center justify-center gap-3 transition-all shadow-xl border",
+                  isCalculating 
+                    ? "bg-slate-800 text-slate-500 border-slate-700 cursor-not-allowed" 
+                    : "bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-400/30 shadow-emerald-600/30 active:scale-[0.99]"
+                )}
+              >
+                {isCalculating ? (
+                  <>
+                    <RefreshCw className="w-5 h-5 animate-spin" />
+                    <span>Publishing Valuation to Account...</span>
+                  </>
+                ) : (
+                  <>
+                    <Send className="w-5 h-5" />
+                    <span>Publish Valuation ({formatCurrency(calculatedNAV)})</span>
+                  </>
+                )}
+              </button>
               
               <div className="bg-amber-500/5 border border-amber-500/20 p-4 rounded-xl flex gap-3">
                 <AlertCircle className="w-4 h-4 text-amber-500 flex-shrink-0 mt-0.5" />

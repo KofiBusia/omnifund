@@ -425,6 +425,7 @@ export default function App() {
                   accounts={accounts} 
                   transactions={transactions} 
                   valuations={valuations}
+                  portfolio={portfolio}
                   initialSearchTerm={globalSearchTerm}
                 />
               )}

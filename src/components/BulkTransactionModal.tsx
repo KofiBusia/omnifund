@@ -10,14 +10,16 @@ import {
   FileText,
   ArrowRight,
   Calendar,
-  DollarSign
+  DollarSign,
+  Sparkles
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import Papa from 'papaparse';
 import { db } from '../firebase';
 import { collection, doc, increment, runTransaction, getDocs, query, where } from 'firebase/firestore';
-import { handleFirestoreError, OperationType, cn, formatCurrency } from '../lib/utils';
+import { handleFirestoreError, OperationType, cn, formatCurrency, safeFormatDate } from '../lib/utils';
 import { processTransactionDocument, ExtractedTransaction } from '../services/geminiService';
+import { calculateSmartNavForDate, SmartNavResult } from '../services/smartNavEngine';
 
 interface BulkTransactionModalProps {
   isOpen: boolean;
@@ -25,6 +27,7 @@ interface BulkTransactionModalProps {
   investors: Investor[];
   accounts: InvestmentAccount[];
   valuations: any[];
+  portfolio?: any[];
 }
 
 interface BulkRow {
@@ -42,7 +45,7 @@ interface ProcessedRow extends BulkRow {
   status: 'pending' | 'valid' | 'invalid' | 'processing' | 'success' | 'error';
 }
 
-export default function BulkTransactionModal({ isOpen, onClose, investors, accounts, valuations }: BulkTransactionModalProps) {
+export default function BulkTransactionModal({ isOpen, onClose, investors, accounts, valuations, portfolio = [] }: BulkTransactionModalProps) {
   const [processedRows, setProcessedRows] = useState<ProcessedRow[]>([]);
   const [selectedAccountId, setSelectedAccountId] = useState<string>(accounts[0]?.id || '');
   const [bulkDate, setBulkDate] = useState<string>(new Date().toISOString().split('T')[0]);
@@ -51,31 +54,50 @@ export default function BulkTransactionModal({ isOpen, onClose, investors, accou
   const [isProcessing, setIsProcessing] = useState(false);
   const [isSmartProcessing, setIsSmartProcessing] = useState(false);
   const [progress, setProgress] = useState(0);
+
+  const [smartNavData, setSmartNavData] = useState<SmartNavResult | null>(null);
+  const [isCalculatingSmartNav, setIsCalculatingSmartNav] = useState(false);
+  const [showSmartNavDetails, setShowSmartNavDetails] = useState(false);
+
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const selectedAccount = accounts.find(a => a.id === selectedAccountId);
 
-  // Smart NAV Lookup
+  // Smart NAV Lookup & Portfolio Valuation Engine
   React.useEffect(() => {
-    if (!useCustomNav && selectedAccountId) {
-      const targetDate = new Date(bulkDate).toISOString().split('T')[0];
-      const sortedVals = [...valuations]
-        .filter(v => v.accountId === selectedAccountId)
-        .sort((a, b) => {
-          const dateA = a.date?.seconds ? a.date.seconds * 1000 : new Date(a.date).getTime();
-          const dateB = b.date?.seconds ? b.date.seconds * 1000 : new Date(b.date).getTime();
-          return dateB - dateA;
+    if (selectedAccountId) {
+      setIsCalculatingSmartNav(true);
+      calculateSmartNavForDate(selectedAccountId, bulkDate, {
+        account: selectedAccount,
+        assets: portfolio,
+        valuations
+      }).then(res => {
+        setSmartNavData(res);
+        if (!useCustomNav) {
+          setManualNav(res.nav);
+        }
+      }).catch(() => {
+        const targetDate = new Date(bulkDate).toISOString().split('T')[0];
+        const sortedVals = [...valuations]
+          .filter(v => v.accountId === selectedAccountId)
+          .sort((a, b) => {
+            const dateA = a.date?.seconds ? a.date.seconds * 1000 : new Date(a.date).getTime();
+            const dateB = b.date?.seconds ? b.date.seconds * 1000 : new Date(b.date).getTime();
+            return dateB - dateA;
+          });
+
+        const match = sortedVals.find(v => {
+          const vDate = v.date?.seconds ? new Date(v.date.seconds * 1000) : new Date(v.date);
+          return vDate.toISOString().split('T')[0] <= targetDate;
         });
 
-      const match = sortedVals.find(v => {
-        const vDate = v.date?.seconds ? new Date(v.date.seconds * 1000) : new Date(v.date);
-        return vDate.toISOString().split('T')[0] <= targetDate;
+        const historicalNav = match?.nav || accounts.find(a => a.id === selectedAccountId)?.nav || 1.0000;
+        setManualNav(historicalNav);
+      }).finally(() => {
+        setIsCalculatingSmartNav(false);
       });
-
-      const historicalNav = match?.nav || accounts.find(a => a.id === selectedAccountId)?.nav || 1.0000;
-      setManualNav(historicalNav);
     }
-  }, [bulkDate, selectedAccountId, useCustomNav, valuations, accounts]);
+  }, [bulkDate, selectedAccountId, useCustomNav, valuations, accounts, selectedAccount, portfolio]);
 
   const downloadTemplate = () => {
     const headers = ['name', 'type', 'amount', 'email', 'phone'];
@@ -157,8 +179,10 @@ export default function BulkTransactionModal({ isOpen, onClose, investors, accou
     });
   };
 
-  const validateRow = (row: BulkRow): ProcessedRow => {
-    const investor = investors.find(i => i.name.toLowerCase() === row.name?.toLowerCase());
+  const validateRow = React.useCallback((row: BulkRow, targetAccountId = selectedAccountId, nav = manualNav): ProcessedRow => {
+    // STRICT ACCOUNT ISOLATION: Only match investors belonging exclusively to targetAccountId
+    const accountInvestors = investors.filter(i => i.accountId === targetAccountId);
+    const investor = accountInvestors.find(i => i.name.toLowerCase() === row.name?.toLowerCase());
     const isNew = !investor;
 
     let error = '';
@@ -166,9 +190,10 @@ export default function BulkTransactionModal({ isOpen, onClose, investors, accou
     else if (isNaN(row.amount) || row.amount <= 0) error = 'Invalid amount';
     else if (row.type !== 'BUY' && row.type !== 'SELL') error = 'Invalid type (use BUY or SELL)';
     else if (investor && row.type === 'SELL') {
-      const currentNav = manualNav;
-      const unitsToSell = row.amount / currentNav;
-      if (investor.unitsOwned < unitsToSell) error = 'Insufficient units';
+      const unitsToSell = row.amount / nav;
+      if ((investor.unitsOwned || 0) < unitsToSell) error = 'Insufficient units in account';
+    } else if (isNew && row.type === 'SELL') {
+      error = 'No existing holding in this account';
     }
 
     return {
@@ -178,7 +203,14 @@ export default function BulkTransactionModal({ isOpen, onClose, investors, accou
       error,
       status: error ? 'invalid' : 'valid'
     };
-  };
+  }, [investors, selectedAccountId, manualNav]);
+
+  // Re-validate processed rows if target account or NAV changes
+  React.useEffect(() => {
+    if (processedRows.length > 0) {
+      setProcessedRows(prev => prev.map(r => validateRow(r, selectedAccountId, manualNav)));
+    }
+  }, [selectedAccountId, manualNav, validateRow]);
 
   const processTransactions = async () => {
     const validRows = processedRows.filter(r => r.status === 'valid');
@@ -342,7 +374,7 @@ export default function BulkTransactionModal({ isOpen, onClose, investors, accou
               Upload a CSV, PDF, or image of a transaction receipt. Our AI will automatically extract the details.
             </p>
             
-            <div className="grid grid-cols-3 gap-4 w-full max-w-2xl mb-8">
+            <div className="grid grid-cols-3 gap-4 w-full max-w-2xl mb-4">
               <div className="space-y-2">
                 <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2 text-center">
                   Investment Date
@@ -416,6 +448,83 @@ export default function BulkTransactionModal({ isOpen, onClose, investors, accou
                   )}
                 </div>
               </div>
+            </div>
+
+            {/* Smart Portfolio Valuation & NAV Lookup Card */}
+            <div className="w-full max-w-2xl mb-8 bg-slate-950/70 border border-emerald-500/30 rounded-2xl p-4 space-y-2.5 shadow-inner text-left">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Sparkles className="w-4 h-4 text-emerald-400 animate-pulse" />
+                  <span className="text-xs font-bold text-white uppercase tracking-wider">
+                    Smart Portfolio Valuation Engine
+                  </span>
+                </div>
+                {isCalculatingSmartNav ? (
+                  <div className="flex items-center gap-1.5 text-[10px] text-emerald-400 font-bold">
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                    Calculating...
+                  </div>
+                ) : (
+                  <span className="text-[9px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-2 py-0.5 rounded-full font-bold uppercase tracking-wider">
+                    {smartNavData?.confidence === 'high' ? '⚡ Asset-Level Precision' : 'Historical Log'}
+                  </span>
+                )}
+              </div>
+
+              {smartNavData && (
+                <div className="space-y-2 text-xs">
+                  <div className="flex items-center justify-between bg-slate-900/90 p-2.5 rounded-xl border border-slate-800">
+                    <div>
+                      <p className="text-[10px] text-slate-400 font-medium">NAV as at {safeFormatDate(bulkDate)}</p>
+                      <p className="text-lg font-black text-emerald-400 font-mono tracking-tight">
+                        {formatCurrency(smartNavData.nav)}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setManualNav(smartNavData.nav);
+                      }}
+                      className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl transition-all shadow-md active:scale-95 flex items-center gap-1"
+                    >
+                      <Sparkles className="w-3 h-3" /> Apply NAV
+                    </button>
+                  </div>
+
+                  <p className="text-[10px] text-slate-400 leading-relaxed italic">
+                    {smartNavData.valuationSource}
+                  </p>
+
+                  {smartNavData.assetBreakdown.length > 0 && (
+                    <div className="pt-2 border-t border-slate-800/80">
+                      <button
+                        type="button"
+                        onClick={() => setShowSmartNavDetails(!showSmartNavDetails)}
+                        className="text-[10px] text-blue-400 hover:text-blue-300 font-bold flex items-center gap-1 transition-colors"
+                      >
+                        {showSmartNavDetails ? '▼ Hide Asset Breakdown' : `► View Portfolio Asset Breakdown (${smartNavData.assetBreakdown.length} Assets)`}
+                      </button>
+
+                      {showSmartNavDetails && (
+                        <div className="mt-2 space-y-1.5 max-h-32 overflow-y-auto pr-1">
+                          {smartNavData.assetBreakdown.map((ast, idx) => (
+                            <div key={idx} className="flex justify-between items-center text-[10px] bg-slate-900/80 p-2 rounded-lg border border-slate-800">
+                              <div>
+                                <span className="font-bold text-white">{ast.ticker}</span> <span className="text-slate-400">- {ast.name}</span>
+                                <span className="text-[9px] text-slate-500 block">Holdings: {ast.quantity.toLocaleString()} units | {ast.source}</span>
+                              </div>
+                              <div className="text-right font-mono">
+                                <span className="text-emerald-400 block font-bold">{formatCurrency(ast.marketValueAtDate)}</span>
+                                <span className="text-[9px] text-slate-500">@{formatCurrency(ast.priceAtDate)}/unit</span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             <input 

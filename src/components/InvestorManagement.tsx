@@ -27,8 +27,13 @@ import {
   CheckCircle2,
   Edit3,
   ShieldCheck,
-  Award
+  Award,
+  Building2,
+  Filter,
+  Trash2,
+  Sparkles
 } from 'lucide-react';
+import { calculateSmartNavForDate, SmartNavResult } from '../services/smartNavEngine';
 import { motion, AnimatePresence } from 'motion/react';
 import { addDoc, collection, serverTimestamp, doc, updateDoc, deleteDoc, increment, runTransaction, writeBatch, query, where, getDocs } from 'firebase/firestore';
 import { db } from '../firebase';
@@ -37,6 +42,7 @@ import Papa from 'papaparse';
 import { toast } from 'sonner';
 
 import { cn, formatCurrency, safeDate, safeISODate, safeFormatDate, safeTimestamp } from '../lib/utils';
+import { isJuly21Transaction, deleteJuly21Transactions } from '../services/transactionCleanup';
 import TransactionHistory from './TransactionHistory';
 import BulkTransactionModal from './BulkTransactionModal';
 import StatementModal from './StatementModal';
@@ -63,6 +69,7 @@ interface InvestorManagementProps {
   accounts: InvestmentAccount[];
   transactions: Transaction[];
   valuations: Valuation[];
+  portfolio?: any[];
   initialSearchTerm?: string;
 }
 
@@ -72,9 +79,11 @@ export default function InvestorManagement({
   accounts, 
   transactions, 
   valuations,
+  portfolio = [],
   initialSearchTerm = ''
 }: InvestorManagementProps) {
   const [searchTerm, setSearchTerm] = useState(initialSearchTerm);
+  const [selectedAccountId, setSelectedAccountId] = useState<string>('ALL');
 
   useEffect(() => {
     if (initialSearchTerm) {
@@ -135,11 +144,33 @@ export default function InvestorManagement({
   const [isMergeModalOpen, setIsMergeModalOpen] = useState(false);
   const [mergeTargetId, setMergeTargetId] = useState<string>('');
   const [isMerging, setIsMerging] = useState(false);
+  
+  const [isDeleteJuly21ModalOpen, setIsDeleteJuly21ModalOpen] = useState(false);
+  const [isDeletingJuly21, setIsDeletingJuly21] = useState(false);
+
+  const july21Transactions = useMemo(() => {
+    return transactions.filter(isJuly21Transaction);
+  }, [transactions]);
+
+  const handleDeleteJuly21 = async () => {
+    setIsDeletingJuly21(true);
+    const toastId = toast.loading(`Deleting ${july21Transactions.length || ''} 07/21/2025 transactions...`);
+    try {
+      const res = await deleteJuly21Transactions(transactions, investors, accounts);
+      toast.success(`Successfully deleted ${res.count} transaction(s) dated 07/21/2025 & reconciled balances!`, { id: toastId });
+      setIsDeleteJuly21ModalOpen(false);
+    } catch (err: any) {
+      toast.error(`Error deleting transactions: ${err?.message || 'Unknown error'}`, { id: toastId });
+    } finally {
+      setIsDeletingJuly21(false);
+    }
+  };
   const [editingInvestorForm, setEditingInvestorForm] = useState({
     name: '',
     email: '',
     phone: '',
     investorId: '',
+    accountId: '',
     kycStatus: 'pending' as 'verified' | 'pending' | 'rejected',
     kycDetails: {
       idVerified: false,
@@ -181,6 +212,10 @@ export default function InvestorManagement({
     manualNav: 1.0000
   });
 
+  const [smartNavData, setSmartNavData] = useState<SmartNavResult | null>(null);
+  const [isCalculatingSmartNav, setIsCalculatingSmartNav] = useState(false);
+  const [showSmartNavDetails, setShowSmartNavDetails] = useState(false);
+
   const getNavForDate = (dateStr: string, accountId: string) => {
     const targetDate = safeISODate(dateStr);
     
@@ -208,16 +243,33 @@ export default function InvestorManagement({
     }
   }, [newInvestor.onboardDate, newInvestor.accountId, isAddModalOpen, newInvestor.useCustomNav]);
 
-  // Watch for date changes in Transaction modal
+  // Watch for date changes in Transaction modal and dynamically evaluate portfolio assets as at that date
   useEffect(() => {
-    if (isTransactionModalOpen && selectedInvestor && !transaction.useCustomNav) {
-      const historicalNav = getNavForDate(transaction.timestamp, selectedInvestor.accountId);
-      setTransaction(prev => ({
-        ...prev,
-        manualNav: historicalNav
-      }));
+    if (isTransactionModalOpen && selectedInvestor) {
+      const accId = selectedInvestor.accountId || fund?.id || '';
+      if (!accId) return;
+
+      setIsCalculatingSmartNav(true);
+      calculateSmartNavForDate(accId, transaction.timestamp, {
+        account: accounts.find(a => a.id === accId) || fund,
+        assets: portfolio,
+        transactions,
+        valuations
+      }).then(res => {
+        setSmartNavData(res);
+        if (!transaction.useCustomNav) {
+          setTransaction(prev => ({
+            ...prev,
+            manualNav: res.nav
+          }));
+        }
+      }).catch(err => {
+        console.warn('Smart NAV calculation failed, falling back:', err);
+      }).finally(() => {
+        setIsCalculatingSmartNav(false);
+      });
     }
-  }, [transaction.timestamp, isTransactionModalOpen, selectedInvestor?.accountId, transaction.useCustomNav]);
+  }, [transaction.timestamp, isTransactionModalOpen, selectedInvestor?.id, selectedInvestor?.accountId, portfolio, transactions, valuations]);
 
   // Ensure accountId is set when accounts load
   useEffect(() => {
@@ -249,14 +301,52 @@ export default function InvestorManagement({
     }
   };
 
-  const filteredInvestors = useMemo(() => 
-    investors.filter(i => 
-      i.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
-      (i.email && i.email.toLowerCase().includes(searchTerm.toLowerCase())) ||
-      (i.investorId && i.investorId.toLowerCase().includes(searchTerm.toLowerCase()))
-    ),
-    [investors, searchTerm]
-  );
+  const filteredInvestors = useMemo(() => {
+    return investors.filter(i => {
+      if (selectedAccountId !== 'ALL' && i.accountId !== selectedAccountId) {
+        return false;
+      }
+      if (!searchTerm) return true;
+
+      const term = searchTerm.toLowerCase();
+      const investorAccount = accounts.find(a => a.id === i.accountId);
+      
+      const matchesName = i.name.toLowerCase().includes(term);
+      const matchesEmail = i.email ? i.email.toLowerCase().includes(term) : false;
+      const matchesId = i.investorId ? i.investorId.toLowerCase().includes(term) : false;
+      const matchesPhone = i.phone ? i.phone.toLowerCase().includes(term) : false;
+      const matchesAccountName = investorAccount ? investorAccount.name.toLowerCase().includes(term) : false;
+      const matchesAccountTicker = investorAccount ? investorAccount.ticker.toLowerCase().includes(term) : false;
+
+      return matchesName || matchesEmail || matchesId || matchesPhone || matchesAccountName || matchesAccountTicker;
+    });
+  }, [investors, selectedAccountId, searchTerm, accounts]);
+
+  const registryStats = useMemo(() => {
+    let totalUnits = 0;
+    let totalMarketValue = 0;
+    let totalInvestment = 0;
+
+    filteredInvestors.forEach(i => {
+      const acc = accounts.find(a => a.id === i.accountId) || fund;
+      const nav = acc?.nav || 0;
+      totalUnits += i.unitsOwned || 0;
+      totalMarketValue += (i.unitsOwned || 0) * nav;
+      totalInvestment += i.totalInvestment || 0;
+    });
+
+    const totalGain = totalMarketValue - totalInvestment;
+    const totalGainPct = totalInvestment > 0 ? (totalGain / totalInvestment) * 100 : 0;
+
+    return {
+      count: filteredInvestors.length,
+      totalUnits,
+      totalMarketValue,
+      totalInvestment,
+      totalGain,
+      totalGainPct
+    };
+  }, [filteredInvestors, accounts, fund]);
 
   const selectedInvestors = useMemo(() => {
     return investors.filter(i => selectedInvestorIds.has(i.id));
@@ -281,19 +371,30 @@ export default function InvestorManagement({
   };
 
   const handleExportCSV = () => {
-    const exportData = filteredInvestors.map(investor => ({
-      'Investor ID': investor.investorId || 'N/A',
-      'Name': investor.name,
-      'Email': investor.email || 'N/A',
-      'Account ID': investor.accountId,
-      'Units Owned': investor.unitsOwned.toFixed(4),
-      'Total Investment (GHS)': investor.totalInvestment.toFixed(2),
-      'Current Value (GHS)': investor.currentValue.toFixed(2),
-      'Gain/Loss (GHS)': (investor.currentValue - investor.totalInvestment).toFixed(2),
-      'Gain/Loss (%)': investor.totalInvestment > 0 
-        ? (((investor.currentValue - investor.totalInvestment) / investor.totalInvestment) * 100).toFixed(2) + '%'
-        : '0.00%'
-    }));
+    const exportData = filteredInvestors.map(investor => {
+      const investorAccount = accounts.find(a => a.id === investor.accountId) || fund;
+      const currentNav = investorAccount?.nav || 0;
+      const currentValue = investor.unitsOwned * currentNav;
+      const gainLoss = currentValue - investor.totalInvestment;
+      const gainLossPct = investor.totalInvestment > 0 
+        ? (((currentValue - investor.totalInvestment) / investor.totalInvestment) * 100).toFixed(2) + '%'
+        : '0.00%';
+
+      return {
+        'Investor ID': investor.investorId || 'N/A',
+        'Name': investor.name,
+        'Email': investor.email || 'N/A',
+        'Phone': investor.phone || 'N/A',
+        'Investment Account': investorAccount ? `${investorAccount.name} (${investorAccount.ticker})` : investor.accountId,
+        'Units Owned': investor.unitsOwned.toFixed(4),
+        'Current NAV per Unit (GHS)': currentNav.toFixed(4),
+        'Total Investment (GHS)': investor.totalInvestment.toFixed(2),
+        'Current Value (GHS)': currentValue.toFixed(2),
+        'Gain/Loss (GHS)': gainLoss.toFixed(2),
+        'Gain/Loss (%)': gainLossPct,
+        'KYC Status': investor.kycStatus || 'pending'
+      };
+    });
 
     const csv = Papa.unparse(exportData);
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
@@ -369,6 +470,7 @@ export default function InvestorManagement({
       email: investor.email || '',
       phone: investor.phone || '',
       investorId: investor.investorId || '',
+      accountId: investor.accountId || (fund?.id || accounts[0]?.id || ''),
       kycStatus: investor.kycStatus || 'pending',
       kycDetails: {
         idVerified: investor.kycDetails?.idVerified || false,
@@ -390,6 +492,7 @@ export default function InvestorManagement({
         email: editingInvestorForm.email,
         phone: editingInvestorForm.phone,
         investorId: editingInvestorForm.investorId,
+        accountId: editingInvestorForm.accountId,
         kycStatus: editingInvestorForm.kycStatus,
         kycDetails: editingInvestorForm.kycDetails
       });
@@ -763,114 +866,201 @@ export default function InvestorManagement({
 
   return (
     <div className="space-y-8">
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-3xl font-bold text-white">Investor Registry</h2>
-          <p className="text-slate-400 mt-1">Manage {investors.length} active fund participants</p>
-        </div>
-        <div className="flex items-center gap-4">
-          {investors.some(i => !i.investorId) && (
-            <button 
-              onClick={handleBackfillIds}
-              disabled={isBackfilling}
-              className="bg-amber-500/10 hover:bg-amber-500/20 text-amber-500 px-4 py-3 rounded-xl font-semibold flex items-center gap-2 transition-all border border-amber-500/20"
-            >
-              {isBackfilling ? <Loader2 className="w-5 h-5 animate-spin" /> : <AlertTriangle className="w-5 h-5" />}
-              Generate Missing IDs
-            </button>
-          )}
-          <button 
-            onClick={handleConnectGmail}
-            className={cn(
-              "flex items-center gap-2 px-4 py-3 rounded-xl font-semibold transition-all border",
-              isGmailConnected 
-                ? "bg-emerald-500/10 text-emerald-500 border-emerald-500/20" 
-                : "bg-blue-500/10 text-blue-500 border-blue-500/20 hover:bg-blue-500/20"
-            )}
-          >
-            <Mail className="w-5 h-4" />
-            {isGmailConnected ? 'Gmail Connected' : 'Connect Gmail'}
-          </button>
-          <button 
-            onClick={() => setIsBulkEmailModalOpen(true)}
-            disabled={!isGmailConnected || (selectedInvestorIds.size === 0 && filteredInvestors.length === 0)}
-            className="bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-white px-4 py-3 rounded-xl font-semibold flex items-center gap-2 transition-all border border-slate-700"
-          >
-            <Users className="w-5 h-5" />
-            {selectedInvestorIds.size > 0 ? `Send to Selected (${selectedInvestorIds.size})` : 'Send to All'}
-          </button>
-          <button 
-            onClick={() => setIsBulkStatementModalOpen(true)}
-            disabled={!isGmailConnected || (selectedInvestorIds.size === 0 && filteredInvestors.length === 0)}
-            className="bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-white px-4 py-3 rounded-xl font-semibold flex items-center gap-2 transition-all border border-slate-700"
-          >
-            <FileText className="w-5 h-5" />
-            {selectedInvestorIds.size > 0 ? `Statements to Selected (${selectedInvestorIds.size})` : 'Statements to All'}
-          </button>
-          <button 
-            onClick={() => {
-              setSelectedInvestorForCertificate(selectedInvestorIds.size === 1 ? (selectedInvestors[0] || null) : null);
-              setIsCertificateModalOpen(true);
-            }}
-            className="bg-amber-600/20 hover:bg-amber-600/30 text-amber-300 border border-amber-500/30 px-4 py-3 rounded-xl font-semibold flex items-center gap-2 transition-all shadow-lg shadow-amber-500/10"
-            title="Design and issue official one-time membership certificates"
-          >
-            <Award className="w-5 h-5 text-amber-400" />
-            {selectedInvestorIds.size > 0 ? `Certificates to Selected (${selectedInvestorIds.size})` : 'Issue Certificates'}
-          </button>
-          <button 
-            onClick={handleExportCSV}
-            className="bg-slate-800 hover:bg-slate-700 text-white px-6 py-3 rounded-xl font-semibold flex items-center gap-2 transition-all border border-slate-700"
-          >
-            <Download className="w-5 h-5" />
-            Export CSV
-          </button>
-          {selectedInvestorIds.size === 2 && (
-            <button 
-              onClick={() => setIsMergeModalOpen(true)}
-              className="bg-purple-600 hover:bg-purple-500 text-white px-6 py-3 rounded-xl font-semibold flex items-center gap-2 transition-all shadow-lg shadow-purple-600/20"
-            >
-              <ArrowRightLeft className="w-5 h-5" />
-              Merge Selected
-            </button>
-          )}
-          {selectedInvestorIds.size > 0 && (
-            <button 
-              onClick={handleBulkVerify}
-              className="bg-emerald-600 hover:bg-emerald-500 text-white px-6 py-3 rounded-xl font-semibold flex items-center gap-2 transition-all shadow-lg shadow-emerald-600/20"
-            >
-              <ShieldCheck className="w-5 h-5" />
-              Verify {selectedInvestorIds.size > 1 ? `(${selectedInvestorIds.size})` : ''}
-            </button>
-          )}
-          <button 
-            onClick={() => setIsBulkModalOpen(true)}
-            className="bg-slate-800 hover:bg-slate-700 text-white px-6 py-3 rounded-xl font-semibold flex items-center gap-2 transition-all border border-slate-700"
-          >
-            <Upload className="w-5 h-5" />
-            Bulk Actions
-          </button>
-          <button 
-            onClick={() => setIsAddModalOpen(true)}
-            className="bg-emerald-600 hover:bg-emerald-500 text-white px-6 py-3 rounded-xl font-semibold flex items-center gap-2 transition-all shadow-lg shadow-emerald-600/20"
-          >
-            <UserPlus className="w-5 h-5" />
-            Add Investor
-          </button>
-        </div>
-      </div>
+      {/* Header & Metric Cards */}
+      <div className="space-y-6">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+          <div>
+            <h2 className="text-3xl font-bold text-white flex items-center gap-3">
+              Investor Registry
+              <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                {registryStats.count} {selectedAccountId === 'ALL' ? 'Total' : 'Fund'} Participants
+              </span>
+            </h2>
+            <p className="text-slate-400 mt-1 text-sm">
+              Manage investor accounts, unit holdings, KYC verifications, and statements per investment account
+            </p>
+          </div>
 
-      {/* Search and Filters */}
-      <div className="flex items-center gap-4 bg-slate-900/50 p-2 rounded-2xl border border-slate-800">
-        <div className="relative flex-1">
-          <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-500" />
-          <input 
-            type="text" 
-            placeholder="Search by name or email..."
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            className="w-full bg-transparent border-none focus:ring-0 pl-12 pr-4 py-3 text-slate-200 placeholder:text-slate-600"
-          />
+          <div className="flex flex-wrap items-center gap-3">
+            {investors.some(i => !i.investorId) && (
+              <button 
+                onClick={handleBackfillIds}
+                disabled={isBackfilling}
+                className="bg-amber-500/10 hover:bg-amber-500/20 text-amber-500 px-4 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2 transition-all border border-amber-500/20"
+              >
+                {isBackfilling ? <Loader2 className="w-4 h-4 animate-spin" /> : <AlertTriangle className="w-4 h-4" />}
+                Generate Missing IDs
+              </button>
+            )}
+            <button 
+              onClick={handleConnectGmail}
+              className={cn(
+                "flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold transition-all border",
+                isGmailConnected 
+                  ? "bg-emerald-500/10 text-emerald-500 border-emerald-500/20" 
+                  : "bg-blue-500/10 text-blue-500 border-blue-500/20 hover:bg-blue-500/20"
+              )}
+            >
+              <Mail className="w-4 h-4" />
+              {isGmailConnected ? 'Gmail Connected' : 'Connect Gmail'}
+            </button>
+            <button 
+              onClick={() => setIsBulkEmailModalOpen(true)}
+              disabled={!isGmailConnected || (selectedInvestorIds.size === 0 && filteredInvestors.length === 0)}
+              className="bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-white px-4 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2 transition-all border border-slate-700"
+            >
+              <Users className="w-4 h-4" />
+              {selectedInvestorIds.size > 0 ? `Email (${selectedInvestorIds.size})` : 'Email All'}
+            </button>
+            <button 
+              onClick={() => setIsBulkStatementModalOpen(true)}
+              disabled={!isGmailConnected || (selectedInvestorIds.size === 0 && filteredInvestors.length === 0)}
+              className="bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-white px-4 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2 transition-all border border-slate-700"
+            >
+              <FileText className="w-4 h-4" />
+              {selectedInvestorIds.size > 0 ? `Statements (${selectedInvestorIds.size})` : 'Statements'}
+            </button>
+            <button 
+              onClick={() => {
+                setSelectedInvestorForCertificate(selectedInvestorIds.size === 1 ? (selectedInvestors[0] || null) : null);
+                setIsCertificateModalOpen(true);
+              }}
+              className="bg-amber-600/20 hover:bg-amber-600/30 text-amber-300 border border-amber-500/30 px-4 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2 transition-all shadow-lg shadow-amber-500/10"
+              title="Design and issue official one-time membership certificates"
+            >
+              <Award className="w-4 h-4 text-amber-400" />
+              {selectedInvestorIds.size > 0 ? `Certificates (${selectedInvestorIds.size})` : 'Certificates'}
+            </button>
+            <button 
+              onClick={handleExportCSV}
+              className="bg-slate-800 hover:bg-slate-700 text-white px-4 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2 transition-all border border-slate-700"
+            >
+              <Download className="w-4 h-4" />
+              Export CSV
+            </button>
+            {selectedInvestorIds.size === 2 && (
+              <button 
+                onClick={() => setIsMergeModalOpen(true)}
+                className="bg-purple-600 hover:bg-purple-500 text-white px-4 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2 transition-all shadow-lg shadow-purple-600/20"
+              >
+                <ArrowRightLeft className="w-4 h-4" />
+                Merge
+              </button>
+            )}
+            {selectedInvestorIds.size > 0 && (
+              <button 
+                onClick={handleBulkVerify}
+                className="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2 transition-all shadow-lg shadow-emerald-600/20"
+              >
+                <ShieldCheck className="w-4 h-4" />
+                Verify ({selectedInvestorIds.size})
+              </button>
+            )}
+            <button 
+              onClick={() => setIsBulkModalOpen(true)}
+              className="bg-slate-800 hover:bg-slate-700 text-white px-4 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2 transition-all border border-slate-700"
+            >
+              <Upload className="w-4 h-4" />
+              Bulk
+            </button>
+            {july21Transactions.length > 0 && (
+              <button 
+                onClick={() => setIsDeleteJuly21ModalOpen(true)}
+                className="bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/30 px-4 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2 transition-all shadow-lg shadow-red-500/10"
+                title="Atomic batch delete all transactions recorded on 07/21/2025"
+              >
+                <Trash2 className="w-4 h-4 text-red-400" />
+                <span>Delete 07/21/2025 ({july21Transactions.length})</span>
+              </button>
+            )}
+            <button 
+              onClick={() => {
+                setNewInvestor(prev => ({
+                  ...prev,
+                  accountId: selectedAccountId !== 'ALL' ? selectedAccountId : (fund?.id || accounts[0]?.id || '')
+                }));
+                setIsAddModalOpen(true);
+              }}
+              className="bg-emerald-600 hover:bg-emerald-500 text-white px-5 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2 transition-all shadow-lg shadow-emerald-600/20"
+            >
+              <UserPlus className="w-4 h-4" />
+              Add Investor
+            </button>
+          </div>
+        </div>
+
+        {/* Metric Cards */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <div className="bg-slate-900/60 border border-slate-800 p-4 rounded-2xl">
+            <div className="flex items-center justify-between text-slate-400 mb-2">
+              <span className="text-xs font-semibold uppercase tracking-wider">Filtered Participants</span>
+              <Users className="w-4 h-4 text-emerald-500" />
+            </div>
+            <p className="text-2xl font-bold text-white">{registryStats.count}</p>
+            <p className="text-xs text-slate-500 mt-1">Across {selectedAccountId === 'ALL' ? `${accounts.length} investment accounts` : 'selected fund'}</p>
+          </div>
+
+          <div className="bg-slate-900/60 border border-slate-800 p-4 rounded-2xl">
+            <div className="flex items-center justify-between text-slate-400 mb-2">
+              <span className="text-xs font-semibold uppercase tracking-wider">Total Units Outstanding</span>
+              <Activity className="w-4 h-4 text-blue-500" />
+            </div>
+            <p className="text-2xl font-bold text-white">{registryStats.totalUnits.toLocaleString(undefined, { maximumFractionDigits: 2 })}</p>
+            <p className="text-xs text-slate-500 mt-1">Allocated participant units</p>
+          </div>
+
+          <div className="bg-slate-900/60 border border-slate-800 p-4 rounded-2xl">
+            <div className="flex items-center justify-between text-slate-400 mb-2">
+              <span className="text-xs font-semibold uppercase tracking-wider">Total Market Value</span>
+              <DollarSign className="w-4 h-4 text-amber-500" />
+            </div>
+            <p className="text-2xl font-bold text-white">{formatCurrency(registryStats.totalMarketValue)}</p>
+            <p className="text-xs text-slate-500 mt-1">Evaluated at fund NAVs</p>
+          </div>
+
+          <div className="bg-slate-900/60 border border-slate-800 p-4 rounded-2xl">
+            <div className="flex items-center justify-between text-slate-400 mb-2">
+              <span className="text-xs font-semibold uppercase tracking-wider">Total Capital Invested</span>
+              <TrendingUp className="w-4 h-4 text-indigo-500" />
+            </div>
+            <p className="text-2xl font-bold text-white">{formatCurrency(registryStats.totalInvestment)}</p>
+            <div className={cn("flex items-center gap-1 text-xs mt-1 font-medium", registryStats.totalGain >= 0 ? "text-emerald-500" : "text-red-500")}>
+              <span>{registryStats.totalGain >= 0 ? '+' : ''}{registryStats.totalGainPct.toFixed(2)}% overall return</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Search and Account Filter */}
+        <div className="flex flex-col sm:flex-row items-center gap-4 bg-slate-900/80 p-3 rounded-2xl border border-slate-800 shadow-sm">
+          <div className="relative flex-1 w-full">
+            <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-500" />
+            <input 
+              type="text" 
+              placeholder="Search by investor name, email, phone, ID, or fund ticker..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              className="w-full bg-transparent border-none focus:ring-0 pl-12 pr-4 py-2.5 text-slate-200 placeholder:text-slate-600 text-sm"
+            />
+          </div>
+
+          <div className="flex items-center gap-3 w-full sm:w-auto border-t sm:border-t-0 sm:border-l border-slate-800 pt-3 sm:pt-0 sm:pl-4">
+            <Filter className="w-4 h-4 text-slate-400 shrink-0" />
+            <select
+              value={selectedAccountId}
+              onChange={(e) => setSelectedAccountId(e.target.value)}
+              className="bg-slate-800 text-slate-200 border border-slate-700 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:border-emerald-500 transition-colors w-full sm:w-auto font-medium"
+            >
+              <option value="ALL">All Investment Accounts ({accounts.length})</option>
+              {accounts.map(acc => {
+                const count = investors.filter(i => i.accountId === acc.id).length;
+                return (
+                  <option key={acc.id} value={acc.id}>
+                    {acc.name} ({acc.ticker}) — {count} investor{count === 1 ? '' : 's'}
+                  </option>
+                );
+              })}
+            </select>
+          </div>
         </div>
       </div>
 
@@ -889,6 +1079,7 @@ export default function InvestorManagement({
               </th>
               <th className="px-6 py-4 text-xs font-semibold text-slate-400 uppercase tracking-wider">ID</th>
               <th className="px-6 py-4 text-xs font-semibold text-slate-400 uppercase tracking-wider">Investor</th>
+              <th className="px-6 py-4 text-xs font-semibold text-slate-400 uppercase tracking-wider">Investment Account</th>
               <th className="px-6 py-4 text-xs font-semibold text-slate-400 uppercase tracking-wider">Units Owned</th>
               <th className="px-6 py-4 text-xs font-semibold text-slate-400 uppercase tracking-wider">Current Value</th>
               <th className="px-6 py-4 text-xs font-semibold text-slate-400 uppercase tracking-wider">Performance</th>
@@ -897,9 +1088,11 @@ export default function InvestorManagement({
           </thead>
           <tbody className="divide-y divide-slate-800">
             {filteredInvestors.map((investor) => {
-              const currentValue = investor.unitsOwned * (fund?.nav || 0);
+              const investorAccount = accounts.find(a => a.id === investor.accountId) || fund;
+              const currentNav = investorAccount?.nav || 0;
+              const currentValue = investor.unitsOwned * currentNav;
               const gainLoss = currentValue - investor.totalInvestment;
-              const gainLossPct = (gainLoss / investor.totalInvestment) * 100;
+              const gainLossPct = investor.totalInvestment > 0 ? (gainLoss / investor.totalInvestment) * 100 : 0;
 
               return (
                 <motion.tr 
@@ -927,7 +1120,7 @@ export default function InvestorManagement({
                   </td>
                   <td className="px-6 py-4">
                     <div className="flex items-center gap-3">
-                      <div className="w-10 h-10 rounded-full bg-slate-800 flex items-center justify-center text-emerald-500 font-bold">
+                      <div className="w-10 h-10 rounded-full bg-slate-800 flex items-center justify-center text-emerald-500 font-bold shrink-0">
                         {investor.name.charAt(0)}
                       </div>
                       <div>
@@ -955,12 +1148,21 @@ export default function InvestorManagement({
                     </div>
                   </td>
                   <td className="px-6 py-4">
+                    <span className="px-2.5 py-1 rounded-lg text-xs font-semibold bg-blue-500/10 text-blue-400 border border-blue-500/20 flex items-center gap-1.5 w-fit">
+                      <Building2 className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+                      <span>{investorAccount?.name || 'Unassigned'}</span>
+                      {investorAccount?.ticker && (
+                        <span className="text-[10px] text-blue-300/60 font-mono">({investorAccount.ticker})</span>
+                      )}
+                    </span>
+                  </td>
+                  <td className="px-6 py-4">
                     <p className="text-sm text-slate-300 font-medium">{investor.unitsOwned.toLocaleString()}</p>
                     <p className="text-xs text-slate-500">Units</p>
                   </td>
                   <td className="px-6 py-4">
                     <p className="text-sm text-white font-bold">{formatCurrency(currentValue)}</p>
-                    <p className="text-xs text-slate-500">Market Value</p>
+                    <p className="text-xs text-slate-500 font-mono">NAV: GH₵{(currentNav).toFixed(4)}</p>
                   </td>
                   <td className="px-6 py-4">
                     <div className={cn(
@@ -1308,6 +1510,19 @@ export default function InvestorManagement({
                     onChange={(e) => setEditingInvestorForm({...editingInvestorForm, investorId: e.target.value})}
                     className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all font-mono"
                   />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-slate-400">Investment Account</label>
+                  <select 
+                    required
+                    value={editingInvestorForm.accountId}
+                    onChange={(e) => setEditingInvestorForm({...editingInvestorForm, accountId: e.target.value})}
+                    className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
+                  >
+                    {accounts.map(acc => (
+                      <option key={acc.id} value={acc.id}>{acc.name} ({acc.ticker})</option>
+                    ))}
+                  </select>
                 </div>
                 <div className="grid grid-cols-2 gap-6">
                   <div className="space-y-2">
@@ -1676,6 +1891,84 @@ export default function InvestorManagement({
                   </div>
                 )}
 
+                {/* Smart Portfolio Valuation & NAV Lookup Card */}
+                <div className="bg-slate-950/70 border border-emerald-500/30 rounded-2xl p-4 space-y-3 shadow-inner">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Sparkles className="w-4 h-4 text-emerald-400 animate-pulse" />
+                      <span className="text-xs font-bold text-white uppercase tracking-wider">
+                        Smart Portfolio Asset Valuation
+                      </span>
+                    </div>
+                    {isCalculatingSmartNav ? (
+                      <div className="flex items-center gap-1.5 text-[10px] text-emerald-400 font-bold">
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                        Calculating...
+                      </div>
+                    ) : (
+                      <span className="text-[9px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-2 py-0.5 rounded-full font-bold uppercase tracking-wider">
+                        {smartNavData?.confidence === 'high' ? '⚡ Asset-Level Precision' : 'Historical Log'}
+                      </span>
+                    )}
+                  </div>
+
+                  {smartNavData && (
+                    <div className="space-y-2 text-xs">
+                      <div className="flex items-center justify-between bg-slate-900/90 p-3 rounded-xl border border-slate-800">
+                        <div>
+                          <p className="text-[10px] text-slate-400 font-medium">NAV as at {safeFormatDate(transaction.timestamp)}</p>
+                          <p className="text-xl font-black text-emerald-400 font-mono tracking-tight">
+                            {formatCurrency(smartNavData.nav)}
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setTransaction(prev => ({ ...prev, manualNav: smartNavData.nav }));
+                            toast.success(`Applied Smart NAV: ${formatCurrency(smartNavData.nav)}`);
+                          }}
+                          className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl transition-all shadow-md active:scale-95 flex items-center gap-1"
+                        >
+                          <Sparkles className="w-3 h-3" /> Apply NAV
+                        </button>
+                      </div>
+
+                      <p className="text-[10px] text-slate-400 leading-relaxed italic">
+                        {smartNavData.valuationSource}
+                      </p>
+
+                      {smartNavData.assetBreakdown.length > 0 && (
+                        <div className="pt-2 border-t border-slate-800/80">
+                          <button
+                            type="button"
+                            onClick={() => setShowSmartNavDetails(!showSmartNavDetails)}
+                            className="text-[10px] text-blue-400 hover:text-blue-300 font-bold flex items-center gap-1 transition-colors"
+                          >
+                            {showSmartNavDetails ? '▼ Hide Asset Breakdown' : `► View Account Portfolio Asset Breakdown (${smartNavData.assetBreakdown.length} Assets)`}
+                          </button>
+
+                          {showSmartNavDetails && (
+                            <div className="mt-2 space-y-1.5 max-h-36 overflow-y-auto pr-1">
+                              {smartNavData.assetBreakdown.map((ast, idx) => (
+                                <div key={idx} className="flex justify-between items-center text-[10px] bg-slate-900/80 p-2 rounded-lg border border-slate-800">
+                                  <div>
+                                    <span className="font-bold text-white">{ast.ticker}</span> <span className="text-slate-400">- {ast.name}</span>
+                                    <span className="text-[9px] text-slate-500 block">Holdings: {ast.quantity.toLocaleString()} units | {ast.source}</span>
+                                  </div>
+                                  <div className="text-right font-mono">
+                                    <span className="text-emerald-400 block font-bold">{formatCurrency(ast.marketValueAtDate)}</span>
+                                    <span className="text-[9px] text-slate-500">@{formatCurrency(ast.priceAtDate)}/unit</span>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+
                 <div className="space-y-2">
                   <label className="text-sm font-medium text-slate-400">Transaction Date</label>
                   <div className="relative">
@@ -1947,6 +2240,7 @@ export default function InvestorManagement({
         investors={investors}
         accounts={accounts}
         valuations={valuations}
+        portfolio={portfolio}
       />
 
       <StatementModal 
@@ -1958,6 +2252,7 @@ export default function InvestorManagement({
         investor={selectedInvestorForStatement}
         fund={fund}
         accounts={accounts}
+        investors={investors}
         transactions={transactions}
         valuations={valuations}
         isGmailConnected={isGmailConnected}
@@ -2128,6 +2423,85 @@ export default function InvestorManagement({
         fund={fund}
         isGmailConnected={isGmailConnected}
       />
+
+      {/* Delete 07/21/2025 Confirmation Dialog Modal */}
+      <AnimatePresence>
+        {isDeleteJuly21ModalOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-slate-900 border border-slate-800 rounded-2xl max-w-md w-full overflow-hidden shadow-2xl"
+            >
+              <div className="p-6 space-y-4">
+                <div className="flex items-center justify-between border-b border-slate-800 pb-4">
+                  <div className="flex items-center gap-3">
+                    <div className="p-2.5 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400">
+                      <AlertTriangle className="w-6 h-6" />
+                    </div>
+                    <div>
+                      <h3 className="text-xl font-bold text-white">Delete 07/21/2025 Transactions</h3>
+                      <p className="text-xs text-slate-400">1-Click Atomic Removal & Balance Reconciliation</p>
+                    </div>
+                  </div>
+                  <button 
+                    onClick={() => setIsDeleteJuly21ModalOpen(false)}
+                    className="text-slate-400 hover:text-white p-1 rounded-lg transition-colors"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+
+                <div className="space-y-3 py-2 text-sm text-slate-300">
+                  <p>
+                    You are about to permanently delete <strong className="text-white font-mono">{july21Transactions.length} transaction(s)</strong> dated <span className="text-amber-400 font-semibold">07/21/2025</span>.
+                  </p>
+
+                  <div className="bg-slate-950/60 rounded-xl p-3.5 border border-slate-800/80 space-y-2 text-xs text-slate-400">
+                    <p className="font-semibold text-slate-200">Automated Atomic Reconciliation:</p>
+                    <ul className="list-disc pl-4 space-y-1 text-slate-400">
+                      <li>Matching transactions will be deleted from Firestore.</li>
+                      <li>Investor unit balances & total investment amounts will be adjusted.</li>
+                      <li>Account cash balances & total units will be restored.</li>
+                      <li>Fund AUM & NAV valuations will be recalculated automatically.</li>
+                    </ul>
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-end gap-3 pt-4 border-t border-slate-800">
+                  <button 
+                    type="button"
+                    onClick={() => setIsDeleteJuly21ModalOpen(false)}
+                    disabled={isDeletingJuly21}
+                    className="px-4 py-2.5 rounded-xl text-sm font-semibold text-slate-300 hover:bg-slate-800 border border-slate-700 transition-all"
+                  >
+                    Cancel
+                  </button>
+                  <button 
+                    type="button"
+                    onClick={handleDeleteJuly21}
+                    disabled={isDeletingJuly21}
+                    className="px-5 py-2.5 rounded-xl text-sm font-semibold bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white flex items-center gap-2 transition-all shadow-lg shadow-red-600/20"
+                  >
+                    {isDeletingJuly21 ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        <span>Deleting & Reconciling...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Trash2 className="w-4 h-4" />
+                        <span>Confirm & Delete All</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

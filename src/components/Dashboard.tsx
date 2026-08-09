@@ -112,7 +112,7 @@ export default function Dashboard({
       change: aumChange
     },
     { 
-      label: 'NAV (Net Asset Value)', 
+      label: 'Price per Unit (NAV)', 
       value: fund?.nav ? formatCurrency(fund.nav) : 'GH₵0.0000', 
       icon: TrendingUp, 
       color: 'text-blue-500',

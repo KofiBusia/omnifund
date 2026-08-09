@@ -14,63 +14,64 @@ export const runGlobalValuation = async () => {
     const assetsSnapshot = await getDocs(collection(db, 'portfolio'));
     const allAssets = assetsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Asset));
 
-    // 3. Get unique tickers
-    const tickers = Array.from(new Set(allAssets.map(a => a.ticker)));
-    if (tickers.length === 0) return;
-
-    // 4. Fetch latest prices
-    const prices = await fetchGSEPrices(tickers);
-    if (!prices) return;
-
-    // 5. Update assets and group by account
-    const accountTotals: Record<string, number> = {};
-    
-    for (const asset of allAssets) {
-      if (prices[asset.ticker]) {
-        const newPrice = prices[asset.ticker];
-        const newMarketValue = asset.quantity * newPrice;
-        const totalCostBasis = asset.totalCostBasis || (asset.quantity * asset.costBasis);
-        
-        await updateDoc(doc(db, 'portfolio', asset.id), {
-          currentPrice: newPrice,
-          marketValue: newMarketValue,
-          valuationDate: new Date().toISOString(),
-          unrealizedGainLoss: newMarketValue - totalCostBasis
-        });
-
-        // Log asset valuation
-        await addDoc(collection(db, 'asset_valuations'), {
-          assetId: asset.id,
-          accountId: asset.accountId,
-          ticker: asset.ticker,
-          price: newPrice,
-          marketValue: newMarketValue,
-          timestamp: serverTimestamp(),
-          notes: 'Automated Global Price Update'
-        });
-
-        if (asset.accountId) {
-          accountTotals[asset.accountId] = (accountTotals[asset.accountId] || 0) + newMarketValue;
-        }
+    // 3. Get unique tickers & attempt to fetch prices
+    const tickers = Array.from(new Set(allAssets.map(a => a.ticker).filter(Boolean)));
+    let prices: Record<string, number> = {};
+    if (tickers.length > 0) {
+      try {
+        const fetched = await fetchGSEPrices(tickers);
+        if (fetched) prices = fetched;
+      } catch (e) {
+        console.warn("Automated market price fetch error (continuing with existing values):", e);
       }
     }
 
-    // 6. Update accounts and investors
+    // 4. Update assets and group by account
+    const accountTotals: Record<string, number> = {};
+    
+    for (const asset of allAssets) {
+      const newPrice = (prices[asset.ticker] && prices[asset.ticker] > 0) ? prices[asset.ticker] : asset.currentPrice;
+      const newMarketValue = asset.quantity * newPrice;
+      const totalCostBasis = asset.totalCostBasis || (asset.quantity * asset.costBasis);
+      
+      await updateDoc(doc(db, 'portfolio', asset.id), {
+        currentPrice: newPrice,
+        marketValue: newMarketValue,
+        valuationDate: new Date().toISOString(),
+        unrealizedGainLoss: newMarketValue - totalCostBasis
+      });
+
+      if (asset.accountId) {
+        accountTotals[asset.accountId] = (accountTotals[asset.accountId] || 0) + newMarketValue;
+      }
+    }
+
+    // 5. Update accounts and investors
     for (const account of accounts) {
+      // Calculate actual total units from investors
+      const invQuery = query(collection(db, 'investors'), where('accountId', '==', account.id));
+      const invSnap = await getDocs(invQuery);
+      const actualTotalUnits = invSnap.docs.reduce((sum, d) => sum + (d.data().unitsOwned || 0), 0) || account.totalUnits || 0;
+
       const totalHoldingsValue = accountTotals[account.id] || 0;
       const totalMarketValue = totalHoldingsValue + (account.cashBalance || 0);
-      const calculatedNAV = account.totalUnits > 0 ? totalMarketValue / account.totalUnits : account.nav;
+      let calculatedNAV = actualTotalUnits > 0 ? totalMarketValue / actualTotalUnits : account.nav;
+
+      if (totalHoldingsValue === 0 && (account.cashBalance || 0) <= 0 && account.nav > 0) {
+        calculatedNAV = account.nav;
+      }
+
+      const totalAum = actualTotalUnits > 0 ? actualTotalUnits * calculatedNAV : totalMarketValue;
 
       try {
         await updateDoc(doc(db, 'accounts', account.id), {
-          aum: totalMarketValue,
+          aum: totalAum,
           nav: calculatedNAV,
+          totalUnits: actualTotalUnits,
           lastValuationDate: new Date().toISOString()
         });
 
         // Update all investors for this account
-        const invQuery = query(collection(db, 'investors'), where('accountId', '==', account.id));
-        const invSnap = await getDocs(invQuery);
         const invUpdates = invSnap.docs.map(d => {
           const invData = d.data();
           return updateDoc(doc(db, 'investors', d.id), {
@@ -79,13 +80,13 @@ export const runGlobalValuation = async () => {
         });
         await Promise.all(invUpdates);
 
-        // 7. Log valuation
+        // Log valuation
         await addDoc(collection(db, 'valuations'), {
           accountId: account.id,
           date: serverTimestamp(),
           nav: calculatedNAV,
-          aum: totalMarketValue,
-          notes: 'Automated Real-time Valuation'
+          aum: totalAum,
+          notes: 'Automated Market Valuation'
         });
       } catch (innerError) {
         handleFirestoreError(innerError, OperationType.WRITE, `accounts/${account.id}/valuation`);
@@ -95,7 +96,7 @@ export const runGlobalValuation = async () => {
     console.log("Global valuation completed successfully.");
   } catch (error) {
     if (error instanceof Error && error.message.includes('JSON')) {
-      throw error; // Re-throw if already formatted
+      throw error;
     }
     handleFirestoreError(error, OperationType.WRITE, 'global_valuation_process');
   }
@@ -106,12 +107,21 @@ export const runManualValuation = async (
   manualGain: number, 
   notes?: string, 
   valuationDate?: string,
-  assetUpdate?: { id: string; newPrice: number }
+  assetUpdate?: { id: string; newPrice: number },
+  targetNav?: number
 ) => {
   try {
     const accountRef = doc(db, 'accounts', accountId);
-    
-    // 1. Handle optional asset price update
+    const accountDoc = await getDoc(accountRef);
+    if (!accountDoc.exists()) throw new Error(`Account ${accountId} not found`);
+    const account = { id: accountDoc.id, ...accountDoc.data() } as InvestmentAccount;
+
+    // 1. Calculate actual total units directly from investors
+    const invQuery = query(collection(db, 'investors'), where('accountId', '==', accountId));
+    const invSnap = await getDocs(invQuery);
+    const actualTotalUnits = invSnap.docs.reduce((sum, d) => sum + (d.data().unitsOwned || 0), 0) || account.totalUnits || 0;
+
+    // 2. Handle single asset price update if specified
     if (assetUpdate) {
       const assetRef = doc(db, 'portfolio', assetUpdate.id);
       const assetDoc = await getDoc(assetRef);
@@ -127,7 +137,6 @@ export const runManualValuation = async (
           unrealizedGainLoss: newMarketValue - totalCostBasis
         });
 
-        // Log asset valuation
         await addDoc(collection(db, 'asset_valuations'), {
           assetId: assetUpdate.id,
           accountId: accountId,
@@ -135,34 +144,53 @@ export const runManualValuation = async (
           price: assetUpdate.newPrice,
           marketValue: newMarketValue,
           timestamp: serverTimestamp(),
-          notes: notes || 'Manual Price Adjustment'
+          notes: notes || 'Manual Asset Price Adjustment'
         });
       }
     }
 
-    // 2. Fetch fresh assets (after potential update)
+    // 3. Fetch fresh portfolio assets for this account
     const assetsSnapshot = await getDocs(query(collection(db, 'portfolio'), where('accountId', '==', accountId)));
     const assets = assetsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Asset));
-    
-    const accountDoc = await getDoc(accountRef);
-    if (!accountDoc.exists()) return;
-    const account = { id: accountDoc.id, ...accountDoc.data() } as InvestmentAccount;
 
-    const portfolioValue = assets.reduce((sum, a) => sum + (a.marketValue || 0), 0);
-    const totalAum = portfolioValue + (account.cashBalance || 0) + manualGain;
-    const finalNav = account.totalUnits > 0 ? totalAum / account.totalUnits : account.nav;
+    let portfolioValue = assets.reduce((sum, a) => sum + (a.marketValue || 0), 0);
+    let totalAum = portfolioValue + (account.cashBalance || 0) + manualGain;
+    let finalNav = actualTotalUnits > 0 ? totalAum / actualTotalUnits : account.nav;
+
+    if (targetNav !== undefined && targetNav > 0) {
+      finalNav = targetNav;
+      totalAum = actualTotalUnits > 0 ? actualTotalUnits * targetNav : (portfolioValue + (account.cashBalance || 0) + manualGain);
+
+      // Proportionally update portfolio assets so asset values align with published NAV & AUM
+      const targetPortfolioValue = totalAum - (account.cashBalance || 0);
+      if (assets.length > 0 && portfolioValue > 0 && targetPortfolioValue > 0) {
+        const ratio = targetPortfolioValue / portfolioValue;
+        const portfolioUpdates = assets.map(asset => {
+          const newMarketVal = asset.marketValue * ratio;
+          const newPrice = asset.quantity > 0 ? newMarketVal / asset.quantity : asset.currentPrice;
+          const totalCostBasis = asset.totalCostBasis || (asset.quantity * asset.costBasis);
+          return updateDoc(doc(db, 'portfolio', asset.id), {
+            currentPrice: newPrice,
+            marketValue: newMarketVal,
+            valuationDate: new Date().toISOString(),
+            unrealizedGainLoss: newMarketVal - totalCostBasis
+          });
+        });
+        await Promise.all(portfolioUpdates);
+      }
+    }
 
     const effectiveDate = valuationDate ? new Date(valuationDate).toISOString() : new Date().toISOString();
 
+    // 4. Update Account in Firestore
     await updateDoc(accountRef, {
       aum: totalAum,
       nav: finalNav,
+      totalUnits: actualTotalUnits,
       lastValuationDate: effectiveDate
     });
 
-    // Update Investors
-    const invQuery = query(collection(db, 'investors'), where('accountId', '==', accountId));
-    const invSnap = await getDocs(invQuery);
+    // 5. Update all Investors belonging to this account
     const investorUpdates = invSnap.docs.map(d => {
       const invData = d.data();
       return updateDoc(doc(db, 'investors', d.id), {
@@ -171,12 +199,13 @@ export const runManualValuation = async (
     });
     await Promise.all(investorUpdates);
 
+    // 6. Log Valuation Entry in Firestore
     await addDoc(collection(db, 'valuations'), {
       accountId,
-      date: valuationDate ? new Date(valuationDate) : serverTimestamp(),
+      date: serverTimestamp(),
       nav: finalNav,
       aum: totalAum,
-      notes: notes || `Manual Valuation (Gain Adjusted: ${manualGain})`
+      notes: notes || `Valuation Published (NAV: GH₵${finalNav.toFixed(4)})`
     });
 
     return { nav: finalNav, aum: totalAum };
@@ -367,7 +396,7 @@ export const recalculateAccountValuation = async (accountId: string) => {
     const accountRef = doc(db, 'accounts', accountId);
     const accountSnap = await getDoc(accountRef);
     if (!accountSnap.exists()) return;
-    const account = accountSnap.data() as InvestmentAccount;
+    const account = { id: accountSnap.id, ...accountSnap.data() } as InvestmentAccount;
 
     const assetsSnapshot = await getDocs(query(collection(db, 'portfolio'), where('accountId', '==', accountId)));
     const allAssets = assetsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Asset));
@@ -395,7 +424,7 @@ export const recalculateAccountValuation = async (accountId: string) => {
 
     // Filter out old valuation logs for today if we want to avoid spam, but usually logging is good
     await addDoc(collection(db, 'valuations'), {
-      accountId: account.id,
+      accountId: accountId,
       date: serverTimestamp(),
       nav: calculatedNAV,
       aum: totalMarketValue,
