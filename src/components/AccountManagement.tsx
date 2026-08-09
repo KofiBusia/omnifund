@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { InvestmentAccount, Investor, Asset, Transaction } from '../types';
+import { InvestmentAccount, Investor, Asset, Transaction, Valuation } from '../types';
 import { cn, formatCurrency } from '../lib/utils';
 import { 
   Plus, 
@@ -25,7 +25,9 @@ import {
   Wand2,
   CheckCircle2,
   Brain,
-  Calendar
+  Calendar,
+  Copy,
+  MessageSquare
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { addDoc, collection, doc, updateDoc, deleteDoc, getDocs, query, where, writeBatch, serverTimestamp, increment, runTransaction } from 'firebase/firestore';
@@ -35,6 +37,8 @@ import TransactionHistory from './TransactionHistory';
 import BulkTransactionModal from './BulkTransactionModal';
 import FundStatementModal from './FundStatementModal';
 import AIAccountAuditor from './AIAccountAuditor';
+import AIAccountChat from './AIAccountChat';
+import { toast } from 'sonner';
 import Papa from 'papaparse';
 import { IngestionEngine, IngestionResult } from '../services/ingestionService';
 import { STPService } from '../services/stpService';
@@ -44,11 +48,12 @@ interface AccountManagementProps {
   investors: Investor[];
   portfolio: Asset[];
   transactions: Transaction[];
+  valuations: Valuation[];
 }
 
 const AUTH_PIN = "1234"; // Default PIN for authorization
 
-export default function AccountManagement({ accounts, investors, portfolio, transactions }: AccountManagementProps) {
+export default function AccountManagement({ accounts, investors, portfolio, transactions, valuations }: AccountManagementProps) {
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [editingAccount, setEditingAccount] = useState<InvestmentAccount | null>(null);
@@ -69,6 +74,7 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
   const [isDeleting, setIsDeleting] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   
+  const [highlightedTransactionId, setHighlightedTransactionId] = useState<string | null>(null);
   const [editingTransaction, setEditingTransaction] = useState<Transaction | null>(null);
   const [isEditTransactionModalOpen, setIsEditTransactionModalOpen] = useState(false);
   const [editTransactionForm, setEditTransactionForm] = useState({
@@ -83,6 +89,10 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
   const [ingestionFiles, setIngestionFiles] = useState<{data: string, mimeType: string}[]>([]);
   const [isProvisioning, setIsProvisioning] = useState(false);
   const [stpLogs, setStpLogs] = useState<string[]>([]);
+  
+  const [isAIChatOpen, setIsAIChatOpen] = useState(false);
+  const [selectedAccountForChat, setSelectedAccountForChat] = useState<InvestmentAccount | null>(null);
+  const [isDuplicating, setIsDuplicating] = useState<string | null>(null);
   
   const [newAccount, setNewAccount] = useState({
     name: '',
@@ -356,6 +366,110 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
     }
   };
 
+  const handleDuplicateAccount = async (account: InvestmentAccount, e: React.MouseEvent) => {
+    e.stopPropagation(); // Stop card selection toggle
+    if (isDuplicating) return;
+    
+    setIsDuplicating(account.id);
+    const toastId = toast.loading(`Duplicating account "${account.name}" and copying positions...`);
+
+    try {
+      // 1. Create duplicated account object
+      const dupAccount = {
+        name: `${account.name} (Copy)`,
+        ticker: `${account.ticker}-DUP`,
+        description: account.description ? `${account.description} (Duplicated copy)` : 'Duplicated account copy',
+        nav: account.nav,
+        cashBalance: account.cashBalance,
+        totalUnits: account.totalUnits,
+        aum: account.aum,
+        lastValuationDate: account.lastValuationDate || new Date().toISOString(),
+        createdAt: new Date().toISOString()
+      };
+
+      const newAccountDocRef = await addDoc(collection(db, 'accounts'), dupAccount);
+      const newAccountId = newAccountDocRef.id;
+
+      // 2. Duplicate active portfolio holdings
+      const portfolioSnap = await getDocs(query(collection(db, 'portfolio'), where('accountId', '==', account.id)));
+      const portfolioPromises = portfolioSnap.docs.map(docSnap => {
+        const data = docSnap.data() || {};
+        const cleanedData: any = {};
+        Object.keys(data).forEach(key => {
+          if (data[key] !== undefined) {
+            cleanedData[key] = data[key];
+          }
+        });
+        // Remove standard doc fields if they are embedded in data
+        delete cleanedData.id;
+
+        return addDoc(collection(db, 'portfolio'), {
+          ...cleanedData,
+          accountId: newAccountId,
+          createdAt: new Date().toISOString()
+        });
+      });
+
+      // 3. Duplicate investors
+      const investorsSnap = await getDocs(query(collection(db, 'investors'), where('accountId', '==', account.id)));
+      const investorMapping: Record<string, string> = {};
+      const investorPromises = investorsSnap.docs.map(async (docSnap) => {
+        const data = docSnap.data() || {};
+        const cleanedData: any = {};
+        Object.keys(data).forEach(key => {
+          if (data[key] !== undefined) {
+            cleanedData[key] = data[key];
+          }
+        });
+        delete cleanedData.id;
+
+        // Ensure critical fields are fallback-populated if missing or undefined
+        if (!cleanedData.name) {
+          cleanedData.name = cleanedData.investorId || 'Unnamed Investor';
+        }
+
+        const newInvRef = await addDoc(collection(db, 'investors'), {
+          ...cleanedData,
+          accountId: newAccountId,
+          createdAt: new Date().toISOString()
+        });
+        investorMapping[docSnap.id] = newInvRef.id;
+      });
+
+      await Promise.all([...portfolioPromises, ...investorPromises]);
+
+      // 4. Duplicate transactions matching the new investor IDs
+      const transactionsSnap = await getDocs(query(collection(db, 'transactions'), where('accountId', '==', account.id)));
+      const transactionPromises = transactionsSnap.docs.map(docSnap => {
+        const data = docSnap.data() || {};
+        const cleanedData: any = {};
+        Object.keys(data).forEach(key => {
+          if (data[key] !== undefined) {
+            cleanedData[key] = data[key];
+          }
+        });
+        delete cleanedData.id;
+
+        const newInvestorId = investorMapping[data.investorId] || data.investorId || '';
+        return addDoc(collection(db, 'transactions'), {
+          ...cleanedData,
+          accountId: newAccountId,
+          investorId: newInvestorId,
+          createdAt: new Date().toISOString()
+        });
+      });
+
+      await Promise.all(transactionPromises);
+
+      toast.success(`Successfully duplicated "${account.name}" into "${dupAccount.name}"!`, { id: toastId });
+    } catch (error: any) {
+      console.error(error);
+      toast.error(`Failed to duplicate account: ${error.message || 'Unknown error'}`, { id: toastId });
+    } finally {
+      setIsDuplicating(null);
+    }
+  };
+
   const handleEditTransaction = (t: Transaction) => {
     setEditingTransaction(t);
     setEditTransactionForm({
@@ -437,6 +551,60 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
       setEditingTransaction(null);
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, 'transactions');
+    }
+  };
+
+  const handleDeleteTransaction = async (t: Transaction) => {
+    const investor = investors.find(i => i.id === t.investorId);
+    const account = accounts.find(a => a.id === t.accountId);
+    
+    if (!investor || !account) {
+      // If investor or account is missing, we still want to be able to delete the transaction
+      // but we can't reconcile balances safely.
+      try {
+        await deleteDoc(doc(db, 'transactions', t.id));
+      } catch (error) {
+        handleFirestoreError(error, OperationType.DELETE, `transactions/${t.id}`);
+      }
+      return;
+    }
+
+    try {
+      await runTransaction(db, async (dbTransaction) => {
+        const accountRef = doc(db, 'accounts', account.id);
+        const investorRef = doc(db, 'investors', investor.id);
+        const transRef = doc(db, 'transactions', t.id);
+
+        let unitsDelta = 0;
+        let amountDelta = 0;
+
+        if (t.type === 'BUY') {
+          // Reversing a BUY: subtract units and subtract cash from fund
+          unitsDelta = -t.units;
+          amountDelta = -t.totalAmount;
+        } else {
+          // Reversing a SELL: add units back and add cash back to fund
+          unitsDelta = t.units;
+          amountDelta = t.totalAmount;
+        }
+
+        // Update Account
+        dbTransaction.update(accountRef, {
+          totalUnits: increment(unitsDelta),
+          cashBalance: increment(amountDelta)
+        });
+
+        // Update Investor
+        dbTransaction.update(investorRef, {
+          unitsOwned: increment(unitsDelta),
+          totalInvestment: increment(amountDelta)
+        });
+
+        // Delete Transaction
+        dbTransaction.delete(transRef);
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, `transactions/${t.id}`);
     }
   };
 
@@ -606,6 +774,28 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
                       <FileText className="w-5 h-5" />
                     </button>
                     <button 
+                      onClick={(e) => handleDuplicateAccount(account, e)}
+                      disabled={isDuplicating === account.id}
+                      className="p-2 hover:bg-emerald-500/10 text-slate-500 hover:text-emerald-500 rounded-lg transition-all disabled:opacity-50"
+                      title="Duplicate Account"
+                    >
+                      {isDuplicating === account.id ? (
+                        <Loader2 className="w-5 h-5 animate-spin" />
+                      ) : (
+                        <Copy className="w-5 h-5" />
+                      )}
+                    </button>
+                    <button 
+                      onClick={() => {
+                        setSelectedAccountForChat(account);
+                        setIsAIChatOpen(true);
+                      }}
+                      className="p-2 hover:bg-violet-500/10 text-slate-500 hover:text-violet-500 rounded-lg transition-all"
+                      title="AI Account Copilot"
+                    >
+                      <MessageSquare className="w-5 h-5 text-violet-400" />
+                    </button>
+                    <button 
                       onClick={() => {
                         setSelectedAccountForAI(account);
                         setIsAIAuditorOpen(true);
@@ -660,6 +850,16 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
             onClose={() => {
               setIsAIAuditorOpen(false);
               setSelectedAccountForAI(null);
+            }}
+            onLocateTransaction={(txId) => {
+              // Closer auditor, set selected account for history, open history, set highlight
+              setIsAIAuditorOpen(false);
+              setSelectedAccountForHistory(selectedAccountForAI);
+              setIsHistoryModalOpen(true);
+              setHighlightedTransactionId(txId);
+              
+              // Clear highlight after some time
+              setTimeout(() => setHighlightedTransactionId(null), 5000);
             }}
             account={selectedAccountForAI}
             transactions={transactions.filter(t => t.accountId === selectedAccountForAI.id)}
@@ -1111,7 +1311,9 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
                 accounts={accounts} 
                 investors={investors} 
                 filterByAccountId={selectedAccountForHistory.id}
+                highlightedId={highlightedTransactionId}
                 onEditTransaction={handleEditTransaction}
+                onDeleteTransaction={handleDeleteTransaction}
                 title="Account Transactions"
               />
             </motion.div>
@@ -1125,7 +1327,9 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
           transactions={transactions} 
           accounts={accounts} 
           investors={investors} 
+          highlightedId={highlightedTransactionId}
           onEditTransaction={handleEditTransaction}
+          onDeleteTransaction={handleDeleteTransaction}
           title="All Account Transactions"
         />
       </div>
@@ -1135,6 +1339,7 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
         onClose={() => setIsBulkModalOpen(false)}
         investors={investors}
         accounts={accounts}
+        valuations={valuations}
       />
 
       <FundStatementModal 
@@ -1147,6 +1352,22 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
         portfolio={portfolio}
         transactions={transactions}
       />
+
+      <AnimatePresence>
+        {isAIChatOpen && selectedAccountForChat && (
+          <AIAccountChat
+            isOpen={isAIChatOpen}
+            onClose={() => {
+              setIsAIChatOpen(false);
+              setSelectedAccountForChat(null);
+            }}
+            account={selectedAccountForChat}
+            portfolio={portfolio.filter(p => p.accountId === selectedAccountForChat.id)}
+            investors={investors.filter(i => i.accountId === selectedAccountForChat.id)}
+            transactions={transactions.filter(t => t.accountId === selectedAccountForChat.id)}
+          />
+        )}
+      </AnimatePresence>
 
       <AnimatePresence>
         {isEditTransactionModalOpen && editingTransaction && (

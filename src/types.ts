@@ -25,6 +25,15 @@ export interface Investor {
   totalInvestment: number;
   currentValue: number;
   kycStatus?: 'verified' | 'pending' | 'rejected';
+  kycDetails?: {
+    idVerified: boolean;
+    addressVerified: boolean;
+    sourceOfFundsVerified: boolean;
+    documents?: string[]; // URLs or document names
+  };
+  certificateIssuedAt?: string;
+  certificateSerial?: string;
+  certificateStatus?: 'ISSUED' | 'PENDING' | 'REVOKED';
 }
 
 export interface Transaction {
@@ -49,8 +58,20 @@ export interface Asset {
   totalCostBasis: number; // Total cost
   currentPrice: number;
   marketValue: number;
-  valuationDate?: string; // Date of acquisition or last valuation
+  valuationDate?: string; // Last price refresh date
+  recordedAt?: string; // Date of acquisition or adding asset
   unrealizedGainLoss?: number;
+}
+
+export interface AssetValuation {
+  id: string;
+  assetId: string;
+  accountId: string;
+  ticker: string;
+  price: number;
+  marketValue: number;
+  timestamp: any;
+  notes?: string;
 }
 
 export interface UserRole {

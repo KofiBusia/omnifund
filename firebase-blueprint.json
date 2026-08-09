@@ -27,7 +27,16 @@
         "email": { "type": "string", "format": "email", "description": "Contact email." },
         "unitsOwned": { "type": "number", "description": "Total units held by the investor." },
         "totalInvestment": { "type": "number", "description": "Total amount invested (cost basis)." },
-        "currentValue": { "type": "number", "description": "Current market value of holdings." }
+        "currentValue": { "type": "number", "description": "Current market value of holdings." },
+        "kycStatus": { "type": "string", "enum": ["verified", "pending", "rejected"], "description": "Final KYC approval status." },
+        "kycDetails": {
+          "type": "object",
+          "properties": {
+            "idVerified": { "type": "boolean" },
+            "addressVerified": { "type": "boolean" },
+            "sourceOfFundsVerified": { "type": "boolean" }
+          }
+        }
       },
       "required": ["uid", "accountId", "name", "email", "unitsOwned"]
     },
@@ -60,6 +69,21 @@
         "marketValue": { "type": "number", "description": "Total current market value." }
       },
       "required": ["accountId", "ticker", "name", "quantity", "costBasis", "currentPrice"]
+    },
+    "assetValuation": {
+      "title": "Asset Valuation",
+      "description": "Record of a specific asset price at a point in time.",
+      "type": "object",
+      "properties": {
+        "assetId": { "type": "string" },
+        "accountId": { "type": "string" },
+        "ticker": { "type": "string" },
+        "price": { "type": "number" },
+        "marketValue": { "type": "number" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "notes": { "type": "string" }
+      },
+      "required": ["assetId", "ticker", "price", "marketValue", "timestamp"]
     }
   },
   "firestore": {
@@ -67,6 +91,8 @@
     "/investors/{investorId}": { "schema": "investor", "description": "Investor records." },
     "/transactions/{transactionId}": { "schema": "transaction", "description": "Historical transactions." },
     "/portfolio/{assetId}": { "schema": "asset", "description": "Assets held by accounts." },
-    "/valuations/{valuationId}": { "schema": "valuation", "description": "Historical NAV and AUM records." }
+    "/valuations/{valuationId}": { "schema": "valuation", "description": "Historical NAV and AUM records." },
+    "/asset_valuations/{valId}": { "schema": "assetValuation", "description": "Historical price records for specific assets." },
+    "/reverted_asset_valuations/{valId}": { "schema": "assetValuation", "description": "Reverted asset valuation records." }
   }
 }

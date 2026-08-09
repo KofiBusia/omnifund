@@ -9,7 +9,8 @@ import {
   Loader2,
   FileText,
   ArrowRight,
-  Calendar
+  Calendar,
+  DollarSign
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import Papa from 'papaparse';
@@ -23,6 +24,7 @@ interface BulkTransactionModalProps {
   onClose: () => void;
   investors: Investor[];
   accounts: InvestmentAccount[];
+  valuations: any[];
 }
 
 interface BulkRow {
@@ -40,16 +42,40 @@ interface ProcessedRow extends BulkRow {
   status: 'pending' | 'valid' | 'invalid' | 'processing' | 'success' | 'error';
 }
 
-export default function BulkTransactionModal({ isOpen, onClose, investors, accounts }: BulkTransactionModalProps) {
+export default function BulkTransactionModal({ isOpen, onClose, investors, accounts, valuations }: BulkTransactionModalProps) {
   const [processedRows, setProcessedRows] = useState<ProcessedRow[]>([]);
   const [selectedAccountId, setSelectedAccountId] = useState<string>(accounts[0]?.id || '');
   const [bulkDate, setBulkDate] = useState<string>(new Date().toISOString().split('T')[0]);
+  const [useCustomNav, setUseCustomNav] = useState(false);
+  const [manualNav, setManualNav] = useState(1.0000);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isSmartProcessing, setIsSmartProcessing] = useState(false);
   const [progress, setProgress] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const selectedAccount = accounts.find(a => a.id === selectedAccountId);
+
+  // Smart NAV Lookup
+  React.useEffect(() => {
+    if (!useCustomNav && selectedAccountId) {
+      const targetDate = new Date(bulkDate).toISOString().split('T')[0];
+      const sortedVals = [...valuations]
+        .filter(v => v.accountId === selectedAccountId)
+        .sort((a, b) => {
+          const dateA = a.date?.seconds ? a.date.seconds * 1000 : new Date(a.date).getTime();
+          const dateB = b.date?.seconds ? b.date.seconds * 1000 : new Date(b.date).getTime();
+          return dateB - dateA;
+        });
+
+      const match = sortedVals.find(v => {
+        const vDate = v.date?.seconds ? new Date(v.date.seconds * 1000) : new Date(v.date);
+        return vDate.toISOString().split('T')[0] <= targetDate;
+      });
+
+      const historicalNav = match?.nav || accounts.find(a => a.id === selectedAccountId)?.nav || 1.0000;
+      setManualNav(historicalNav);
+    }
+  }, [bulkDate, selectedAccountId, useCustomNav, valuations, accounts]);
 
   const downloadTemplate = () => {
     const headers = ['name', 'type', 'amount', 'email', 'phone'];
@@ -140,7 +166,7 @@ export default function BulkTransactionModal({ isOpen, onClose, investors, accou
     else if (isNaN(row.amount) || row.amount <= 0) error = 'Invalid amount';
     else if (row.type !== 'BUY' && row.type !== 'SELL') error = 'Invalid type (use BUY or SELL)';
     else if (investor && row.type === 'SELL') {
-      const currentNav = selectedAccount?.nav || 1.0000;
+      const currentNav = manualNav;
       const unitsToSell = row.amount / currentNav;
       if (investor.unitsOwned < unitsToSell) error = 'Insufficient units';
     }
@@ -168,7 +194,7 @@ export default function BulkTransactionModal({ isOpen, onClose, investors, accou
       setProcessedRows(prev => prev.map((r, idx) => idx === rowIndex ? { ...r, status: 'processing' } : r));
 
       try {
-        const currentNav = selectedAccount.nav || 1.0000;
+        const currentNav = manualNav;
 
         await runTransaction(db, async (dbTransaction) => {
           const accountRef = doc(db, 'accounts', selectedAccount.id);
@@ -316,7 +342,7 @@ export default function BulkTransactionModal({ isOpen, onClose, investors, accou
               Upload a CSV, PDF, or image of a transaction receipt. Our AI will automatically extract the details.
             </p>
             
-            <div className="grid grid-cols-2 gap-4 w-full max-w-lg mb-8">
+            <div className="grid grid-cols-3 gap-4 w-full max-w-2xl mb-8">
               <div className="space-y-2">
                 <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2 text-center">
                   Investment Date
@@ -344,6 +370,51 @@ export default function BulkTransactionModal({ isOpen, onClose, investors, accou
                     <option key={a.id} value={a.id}>{a.name} ({a.ticker})</option>
                   ))}
                 </select>
+              </div>
+              <div className="space-y-2">
+                <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2 text-center">
+                  Unit Price (NAV)
+                </label>
+                <div className="p-1 bg-slate-800 border border-slate-700 rounded-xl flex flex-col gap-2">
+                  <div className="flex items-center justify-between px-2">
+                    <span className="text-[10px] text-slate-500">Manual Price</span>
+                    <input 
+                      type="checkbox"
+                      checked={useCustomNav}
+                      onChange={(e) => {
+                        setUseCustomNav(e.target.checked);
+                        if (e.target.checked) setManualNav(selectedAccount?.nav || 1.0000);
+                      }}
+                      className="w-3 h-3 rounded border-slate-600 bg-slate-700 text-emerald-500 focus:ring-emerald-500"
+                    />
+                  </div>
+                  {useCustomNav ? (
+                    <div className="relative">
+                      <DollarSign className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+                      <input 
+                        type="number"
+                        step="0.0001"
+                        value={manualNav}
+                        onChange={(e) => setManualNav(Number(e.target.value))}
+                        className="w-full bg-slate-900 border-none rounded-lg pl-9 pr-3 py-1.5 text-white focus:ring-1 focus:ring-emerald-500 outline-none text-xs"
+                      />
+                    </div>
+                  ) : (
+                    <div className="flex flex-col gap-0.5 px-2 py-1">
+                      <div className="text-xs text-white font-bold">{formatCurrency(manualNav)}</div>
+                      <div className="flex items-center gap-1">
+                        <span className="text-[7px] text-slate-500 uppercase font-black tracking-tighter">
+                          {new Date(bulkDate).toISOString().split('T')[0] === new Date().toISOString().split('T')[0] 
+                            ? 'Market Price' 
+                            : 'Historical Price'}
+                        </span>
+                        {new Date(bulkDate).toISOString().split('T')[0] !== new Date().toISOString().split('T')[0] && (
+                          <div className="w-1 h-1 bg-blue-500 rounded-full animate-pulse" />
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
 

@@ -62,6 +62,16 @@ service cloud.firestore {
       allow write: if isAdmin();
     }
 
+    match /asset_valuations/{valId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    match /reverted_asset_valuations/{valId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
     // User Roles (Internal)
     match /users/{userId} {
       allow read: if isSignedIn() && (isOwner(userId) || isAdmin());

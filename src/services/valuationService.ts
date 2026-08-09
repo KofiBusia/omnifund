@@ -34,7 +34,19 @@ export const runGlobalValuation = async () => {
         await updateDoc(doc(db, 'portfolio', asset.id), {
           currentPrice: newPrice,
           marketValue: newMarketValue,
+          valuationDate: new Date().toISOString(),
           unrealizedGainLoss: newMarketValue - totalCostBasis
+        });
+
+        // Log asset valuation
+        await addDoc(collection(db, 'asset_valuations'), {
+          assetId: asset.id,
+          accountId: asset.accountId,
+          ticker: asset.ticker,
+          price: newPrice,
+          marketValue: newMarketValue,
+          timestamp: serverTimestamp(),
+          notes: 'Automated Global Price Update'
         });
 
         if (asset.accountId) {
@@ -111,7 +123,19 @@ export const runManualValuation = async (
         await updateDoc(assetRef, {
           currentPrice: assetUpdate.newPrice,
           marketValue: newMarketValue,
+          valuationDate: new Date().toISOString(),
           unrealizedGainLoss: newMarketValue - totalCostBasis
+        });
+
+        // Log asset valuation
+        await addDoc(collection(db, 'asset_valuations'), {
+          assetId: assetUpdate.id,
+          accountId: accountId,
+          ticker: assetData.ticker,
+          price: assetUpdate.newPrice,
+          marketValue: newMarketValue,
+          timestamp: serverTimestamp(),
+          notes: notes || 'Manual Price Adjustment'
         });
       }
     }
@@ -239,6 +263,148 @@ export const deleteLatestValuation = async (accountId: string, valuationId: stri
   } catch (error) {
     console.error('Undo failure details:', error);
     handleFirestoreError(error, OperationType.DELETE, 'valuation_undo');
+    throw error;
+  }
+};
+
+export const revertAssetValuation = async (assetId: string, valuationId: string) => {
+  try {
+    // 1. Get the valuation to revert (the one we are undoing)
+    const valRef = doc(db, 'asset_valuations', valuationId);
+    const valSnap = await getDoc(valRef);
+    if (!valSnap.exists()) throw new Error("Valuation record not found");
+    const valToUndo = valSnap.data() as any;
+    const accountId = valToUndo.accountId;
+
+    // 2. Find the previous valuation for this asset (the one to restore)
+    const q = query(
+      collection(db, 'asset_valuations'),
+      where('assetId', '==', assetId),
+      where('timestamp', '<', valToUndo.timestamp)
+    );
+    const snapshot = await getDocs(q);
+    const previousValuations = snapshot.docs
+      .map(d => ({ id: d.id, ...d.data() } as any))
+      .sort((a, b) => (b.timestamp?.seconds || 0) - (a.timestamp?.seconds || 0));
+
+    const assetRef = doc(db, 'portfolio', assetId);
+    const assetSnap = await getDoc(assetRef);
+    if (!assetSnap.exists()) throw new Error("Asset not found");
+    const asset = assetSnap.data() as Asset;
+
+    let restoredPrice = asset.costBasis;
+    if (previousValuations.length > 0) {
+      restoredPrice = previousValuations[0].price;
+    }
+
+    const restoredMarketValue = asset.quantity * restoredPrice;
+    const totalCostBasis = asset.totalCostBasis || (asset.quantity * asset.costBasis);
+
+    // 3. Update the asset
+    await updateDoc(assetRef, {
+      currentPrice: restoredPrice,
+      marketValue: restoredMarketValue,
+      valuationDate: new Date().toISOString(),
+      unrealizedGainLoss: restoredMarketValue - totalCostBasis
+    });
+
+    // 4. Archive/Delete the valuation we are undoing
+    await addDoc(collection(db, 'reverted_asset_valuations'), {
+      ...valToUndo,
+      revertedAt: serverTimestamp()
+    });
+    await deleteDoc(valRef);
+
+    // 5. Recalculate Fund NAV
+    // Fetch all assets in account
+    const assetsSnapshot = await getDocs(query(collection(db, 'portfolio'), where('accountId', '==', accountId)));
+    const allAssets = assetsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Asset));
+    
+    const accountRef = doc(db, 'accounts', accountId);
+    const accountSnap = await getDoc(accountRef);
+    if (!accountSnap.exists()) return;
+    const account = accountSnap.data() as InvestmentAccount;
+
+    const portfolioValue = allAssets.reduce((sum, a) => sum + (a.marketValue || 0), 0);
+    const totalAum = portfolioValue + (account.cashBalance || 0);
+    const finalNav = account.totalUnits > 0 ? totalAum / account.totalUnits : account.nav;
+
+    await updateDoc(accountRef, {
+      aum: totalAum,
+      nav: finalNav,
+      lastValuationDate: new Date().toISOString()
+    });
+
+    // 6. Update Investors
+    const invQuery = query(collection(db, 'investors'), where('accountId', '==', accountId));
+    const invSnap = await getDocs(invQuery);
+    const investorUpdates = invSnap.docs.map(d => {
+      const invData = d.data();
+      return updateDoc(doc(db, 'investors', d.id), {
+        currentValue: (invData.unitsOwned || 0) * finalNav
+      });
+    });
+    await Promise.all(investorUpdates);
+
+    // 7. Log account level valuation change
+    await addDoc(collection(db, 'valuations'), {
+      accountId,
+      date: serverTimestamp(),
+      nav: finalNav,
+      aum: totalAum,
+      notes: `Asset ${valToUndo.ticker} Valuation Reversed`
+    });
+
+    return { nav: finalNav, aum: totalAum };
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, 'revert_asset_valuation');
+    throw error;
+  }
+};
+
+export const recalculateAccountValuation = async (accountId: string) => {
+  try {
+    const accountRef = doc(db, 'accounts', accountId);
+    const accountSnap = await getDoc(accountRef);
+    if (!accountSnap.exists()) return;
+    const account = accountSnap.data() as InvestmentAccount;
+
+    const assetsSnapshot = await getDocs(query(collection(db, 'portfolio'), where('accountId', '==', accountId)));
+    const allAssets = assetsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Asset));
+
+    const totalHoldingsValue = allAssets.reduce((sum, a) => sum + (a.marketValue || 0), 0);
+    const totalMarketValue = totalHoldingsValue + (account.cashBalance || 0);
+    const calculatedNAV = account.totalUnits > 0 ? totalMarketValue / account.totalUnits : account.nav;
+
+    await updateDoc(accountRef, {
+      aum: totalMarketValue,
+      nav: calculatedNAV,
+      lastValuationDate: new Date().toISOString()
+    });
+
+    // Update all investors for this account
+    const invQuery = query(collection(db, 'investors'), where('accountId', '==', accountId));
+    const invSnap = await getDocs(invQuery);
+    const invUpdates = invSnap.docs.map(d => {
+      const invData = d.data();
+      return updateDoc(doc(db, 'investors', d.id), {
+        currentValue: (invData.unitsOwned || 0) * calculatedNAV
+      });
+    });
+    await Promise.all(invUpdates);
+
+    // Filter out old valuation logs for today if we want to avoid spam, but usually logging is good
+    await addDoc(collection(db, 'valuations'), {
+      accountId: account.id,
+      date: serverTimestamp(),
+      nav: calculatedNAV,
+      aum: totalMarketValue,
+      notes: 'Manual Portfolio Change Recalculation'
+    });
+
+    return { aum: totalMarketValue, nav: calculatedNAV };
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, `accounts/${accountId}/recalculate`);
     throw error;
   }
 };

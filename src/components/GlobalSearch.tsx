@@ -10,7 +10,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Investor, InvestmentAccount, Transaction } from '../types';
-import { formatCurrency, cn } from '../lib/utils';
+import { formatCurrency, cn, safeFormatDate } from '../lib/utils';
 
 interface GlobalSearchProps {
   investors: Investor[];
@@ -267,7 +267,7 @@ export default function GlobalSearch({
                             <div className="flex-1 min-w-0">
                               <p className="text-sm font-bold text-white truncate">{transaction.investorName}</p>
                               <p className="text-xs text-slate-500 truncate">
-                                {formatCurrency(transaction.totalAmount)} • {new Date(transaction.timestamp).toLocaleDateString()}
+                                {formatCurrency(transaction.totalAmount)} • {safeFormatDate(transaction.timestamp)}
                               </p>
                             </div>
                             <ChevronRight className="w-4 h-4 text-slate-600 group-hover:text-slate-200 transition-all transform group-hover:translate-x-1" />

@@ -13,7 +13,8 @@ import {
   AlertCircle,
   CheckCircle2,
   Zap,
-  ArrowRight
+  ArrowRight,
+  Search
 } from 'lucide-react';
 import { InvestmentAccount, Transaction, Asset, Investor } from '../types';
 import { getGeminiResponse } from '../lib/gemini';
@@ -28,6 +29,7 @@ interface AIAccountAuditorProps {
   transactions: Transaction[];
   portfolio: Asset[];
   investors: Investor[];
+  onLocateTransaction?: (txId: string) => void;
 }
 
 interface Message {
@@ -37,13 +39,13 @@ interface Message {
 }
 
 interface AIActionResult {
-  type: 'UPDATE_ACCOUNT' | 'CORRECT_TRANSACTION' | 'ADJUST_PORTFOLIO';
+  type: 'UPDATE_ACCOUNT' | 'CORRECT_TRANSACTION' | 'ADJUST_PORTFOLIO' | 'LOCATE_TRANSACTION';
   description: string;
   data: any;
   status: 'pending' | 'executing' | 'completed' | 'failed';
 }
 
-export default function AIAccountAuditor({ isOpen, onClose, account, transactions, portfolio, investors }: AIAccountAuditorProps) {
+export default function AIAccountAuditor({ isOpen, onClose, account, transactions, portfolio, investors, onLocateTransaction }: AIAccountAuditorProps) {
   const [messages, setMessages] = useState<Message[]>([
     { 
       role: 'assistant', 
@@ -72,12 +74,25 @@ export default function AIAccountAuditor({ isOpen, onClose, account, transaction
     try {
       const contextStr = `
         ACCOUNT: ${JSON.stringify(account)}
-        TRANSACTIONS: ${JSON.stringify(transactions.slice(0, 50))}
+        TRANSACTIONS (LAST 100): ${JSON.stringify(transactions.slice(0, 100).map(t => ({
+          id: t.id,
+          date: t.timestamp,
+          investor: investors.find(i => i.id === t.investorId)?.name,
+          type: t.type,
+          amt: t.totalAmount,
+          units: t.units
+        })))}
         PORTFOLIO: ${JSON.stringify(portfolio)}
         INVESTORS: ${JSON.stringify(investors.map(i => ({ id: i.id, name: i.name, units: i.unitsOwned })))}
         
         GOAL: Act as a Senior Fund Auditor. If the user asks for a correction or analysis, provide it. 
         If an action is requested (e.g. "Fix the NAV", "Correct the units for account X"), end your response with a JSON block marked as ACTIONS: [ { type: '...', description: '...', data: { ... } } ]
+        
+        SUPPORTED ACTION TYPES:
+        1. UPDATE_ACCOUNT: For account-level fixes.
+        2. CORRECT_TRANSACTION: For fixing a specific legacy transaction. Requires 'id' in data.
+        3. LOCATE_TRANSACTION: For highlighting a specific transaction in the history for the user to review. Requires 'id' in data.
+        4. ADJUST_PORTFOLIO: For portfolio discrepancies.
       `;
       
       const response = await getGeminiResponse(userMessage, contextStr);
@@ -129,8 +144,14 @@ export default function AIAccountAuditor({ isOpen, onClose, account, transaction
           await updateDoc(doc(db, 'accounts', account.id), action.data);
           break;
         case 'CORRECT_TRANSACTION':
-          const { id, ...txData } = action.data;
-          await updateDoc(doc(db, 'transactions', id), txData);
+          const { id: txId, ...txData } = action.data;
+          await updateDoc(doc(db, 'transactions', txId), txData);
+          break;
+        case 'LOCATE_TRANSACTION':
+          if (onLocateTransaction && action.data.id) {
+            onLocateTransaction(action.data.id);
+            // Don't wait for any firestore op, just mark done
+          }
           break;
         case 'ADJUST_PORTFOLIO':
           // logic for portfolio adjustment
@@ -237,11 +258,15 @@ export default function AIAccountAuditor({ isOpen, onClose, account, transaction
                               >
                                 <div className="flex items-center gap-3">
                                   <div className="w-8 h-8 bg-blue-500/10 rounded-lg flex items-center justify-center">
-                                    <Zap className="w-4 h-4 text-blue-500" />
+                                    {action.type === 'LOCATE_TRANSACTION' ? (
+                                      <Search className="w-4 h-4 text-blue-500" />
+                                    ) : (
+                                      <Zap className="w-4 h-4 text-blue-500" />
+                                    )}
                                   </div>
                                   <div>
                                     <p className="text-xs font-bold text-white mb-0.5">{action.description}</p>
-                                    <p className="text-[10px] text-slate-500 uppercase tracking-widest">{action.type}</p>
+                                    <p className="text-[10px] text-slate-500 uppercase tracking-widest">{action.type.replace('_', ' ')}</p>
                                   </div>
                                 </div>
                                 
@@ -256,7 +281,12 @@ export default function AIAccountAuditor({ isOpen, onClose, account, transaction
                                     "bg-red-500/10 text-red-500"
                                   )}
                                 >
-                                  {action.status === 'pending' && <><ArrowRight className="w-3 h-3" /> Execute</>}
+                                  {action.status === 'pending' && (
+                                    <>
+                                      <ArrowRight className="w-3 h-3" /> 
+                                      {action.type === 'LOCATE_TRANSACTION' ? 'View in History' : 'Execute'}
+                                    </>
+                                  )}
                                   {action.status === 'executing' && <><Loader2 className="w-3 h-3 animate-spin" /> Working...</>}
                                   {action.status === 'completed' && <><CheckCircle2 className="w-3 h-3" /> Applied</>}
                                   {action.status === 'failed' && <><X className="w-3 h-3" /> Failed</>}

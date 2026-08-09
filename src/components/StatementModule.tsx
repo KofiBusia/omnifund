@@ -40,10 +40,14 @@ export default function StatementModule({ investors, accounts, transactions, val
   const checkGmailStatus = async () => {
     try {
       const res = await fetch('/api/auth/google/status');
-      const data = await res.json();
-      setIsGmailConnected(data.connected);
-    } catch (error) {
-      console.error('Failed to check Gmail status');
+      if (res.ok) {
+        const data = await res.json();
+        setIsGmailConnected(!!data.connected);
+      } else {
+        setIsGmailConnected(false);
+      }
+    } catch {
+      setIsGmailConnected(false);
     }
   };
 

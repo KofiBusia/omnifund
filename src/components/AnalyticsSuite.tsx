@@ -1,6 +1,6 @@
 import React, { useMemo } from 'react';
 import { InvestmentAccount, Asset, Valuation } from '../types';
-import { formatCurrency, cn } from '../lib/utils';
+import { formatCurrency, cn, safeFormatDate } from '../lib/utils';
 import { 
   TrendingUp, 
   Activity, 
@@ -148,7 +148,7 @@ export default function AnalyticsSuite({ fund, portfolio, valuations }: Analytic
       
       return {
         timestamp: v.date?.seconds || i,
-        date: new Date(v.date?.seconds * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
+        date: safeFormatDate(v.date),
         nav: v.nav,
         benchmark: benchmarkNav
       };

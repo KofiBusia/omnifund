@@ -24,21 +24,26 @@ import {
   BarChart3,
   Download,
   Calendar,
-  CheckCircle2
+  CheckCircle2,
+  Edit3,
+  ShieldCheck,
+  Award
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { addDoc, collection, serverTimestamp, doc, updateDoc, increment, runTransaction, writeBatch } from 'firebase/firestore';
+import { addDoc, collection, serverTimestamp, doc, updateDoc, deleteDoc, increment, runTransaction, writeBatch, query, where, getDocs } from 'firebase/firestore';
 import { db } from '../firebase';
 import { handleFirestoreError, OperationType } from '../lib/utils';
 import Papa from 'papaparse';
+import { toast } from 'sonner';
 
-import { cn, formatCurrency } from '../lib/utils';
+import { cn, formatCurrency, safeDate, safeISODate, safeFormatDate, safeTimestamp } from '../lib/utils';
 import TransactionHistory from './TransactionHistory';
 import BulkTransactionModal from './BulkTransactionModal';
 import StatementModal from './StatementModal';
 import EmailInvestorModal from './EmailInvestorModal';
 import BulkEmailModal from './BulkEmailModal';
 import BulkStatementModal from './BulkStatementModal';
+import MembershipCertificateModal from './MembershipCertificateModal';
 import { 
   AreaChart, 
   Area, 
@@ -91,10 +96,14 @@ export default function InvestorManagement({
   const checkGmailStatus = async () => {
     try {
       const res = await fetch('/api/auth/google/status');
-      const data = await res.json();
-      setIsGmailConnected(data.connected);
-    } catch (error) {
-      console.error('Failed to check Gmail status');
+      if (res.ok) {
+        const data = await res.json();
+        setIsGmailConnected(!!data.connected);
+      } else {
+        setIsGmailConnected(false);
+      }
+    } catch {
+      setIsGmailConnected(false);
     }
   };
 
@@ -103,8 +112,8 @@ export default function InvestorManagement({
       const res = await fetch('/api/auth/google/url');
       const { url } = await res.json();
       window.open(url, 'google_auth', 'width=600,height=700');
-    } catch (error) {
-      console.error('Failed to get auth URL');
+    } catch {
+      toast.error('Failed to initiate Gmail connection');
     }
   };
 
@@ -116,15 +125,35 @@ export default function InvestorManagement({
   const [isEmailModalOpen, setIsEmailModalOpen] = useState(false);
   const [isBulkEmailModalOpen, setIsBulkEmailModalOpen] = useState(false);
   const [isBulkStatementModalOpen, setIsBulkStatementModalOpen] = useState(false);
+  const [isCertificateModalOpen, setIsCertificateModalOpen] = useState(false);
+  const [selectedInvestorForCertificate, setSelectedInvestorForCertificate] = useState<Investor | null>(null);
   const [isGmailConnected, setIsGmailConnected] = useState(false);
   const [isBackfilling, setIsBackfilling] = useState(false);
   const [selectedInvestor, setSelectedInvestor] = useState<Investor | null>(null);
+  const [editingInvestor, setEditingInvestor] = useState<Investor | null>(null);
+  const [isEditInvestorModalOpen, setIsEditInvestorModalOpen] = useState(false);
+  const [isMergeModalOpen, setIsMergeModalOpen] = useState(false);
+  const [mergeTargetId, setMergeTargetId] = useState<string>('');
+  const [isMerging, setIsMerging] = useState(false);
+  const [editingInvestorForm, setEditingInvestorForm] = useState({
+    name: '',
+    email: '',
+    phone: '',
+    investorId: '',
+    kycStatus: 'pending' as 'verified' | 'pending' | 'rejected',
+    kycDetails: {
+      idVerified: false,
+      addressVerified: false,
+      sourceOfFundsVerified: false
+    }
+  });
   const [editingTransaction, setEditingTransaction] = useState<Transaction | null>(null);
   const [isEditTransactionModalOpen, setIsEditTransactionModalOpen] = useState(false);
   const [editTransactionForm, setEditTransactionForm] = useState({
     type: 'BUY' as 'BUY' | 'SELL',
     amount: 0,
     units: 0,
+    pricePerUnit: 0,
     timestamp: ''
   });
   const [selectedInvestorForStatement, setSelectedInvestorForStatement] = useState<Investor | null>(null);
@@ -137,8 +166,58 @@ export default function InvestorManagement({
     phone: '',
     investmentAmount: 0,
     accountId: fund?.id || (accounts.length > 0 ? accounts[0].id : ''),
-    onboardDate: new Date().toISOString().split('T')[0]
+    onboardDate: new Date().toISOString().split('T')[0],
+    kycStatus: 'pending' as 'verified' | 'pending' | 'rejected',
+    useCustomNav: false,
+    manualNav: 1.0000
   });
+
+  const [transaction, setTransaction] = useState({
+    type: 'BUY' as 'BUY' | 'SELL',
+    amount: 0,
+    units: 0,
+    timestamp: new Date().toISOString().split('T')[0],
+    useCustomNav: false,
+    manualNav: 1.0000
+  });
+
+  const getNavForDate = (dateStr: string, accountId: string) => {
+    const targetDate = safeISODate(dateStr);
+    
+    // Sort valuations by date descending to find the closest one
+    const sortedVals = [...valuations]
+      .filter(v => v.accountId === accountId)
+      .sort((a, b) => safeTimestamp(b.date) - safeTimestamp(a.date));
+
+    // Find exact match or the closest previous valuation
+    const match = sortedVals.find(v => {
+      return safeISODate(v.date) <= targetDate;
+    });
+
+    return match?.nav || accounts.find(a => a.id === accountId)?.nav || 1.0000;
+  };
+
+  // Watch for date changes in Add Investor modal
+  useEffect(() => {
+    if (isAddModalOpen && !newInvestor.useCustomNav) {
+      const historicalNav = getNavForDate(newInvestor.onboardDate, newInvestor.accountId);
+      setNewInvestor(prev => ({
+        ...prev,
+        manualNav: historicalNav
+      }));
+    }
+  }, [newInvestor.onboardDate, newInvestor.accountId, isAddModalOpen, newInvestor.useCustomNav]);
+
+  // Watch for date changes in Transaction modal
+  useEffect(() => {
+    if (isTransactionModalOpen && selectedInvestor && !transaction.useCustomNav) {
+      const historicalNav = getNavForDate(transaction.timestamp, selectedInvestor.accountId);
+      setTransaction(prev => ({
+        ...prev,
+        manualNav: historicalNav
+      }));
+    }
+  }, [transaction.timestamp, isTransactionModalOpen, selectedInvestor?.accountId, transaction.useCustomNav]);
 
   // Ensure accountId is set when accounts load
   useEffect(() => {
@@ -149,12 +228,6 @@ export default function InvestorManagement({
       }));
     }
   }, [fund, accounts, newInvestor.accountId]);
-
-  const [transaction, setTransaction] = useState({
-    type: 'BUY' as 'BUY' | 'SELL',
-    amount: 0,
-    units: 0
-  });
 
   const handleBackfillIds = async () => {
     const missingIds = investors.filter(i => !i.investorId);
@@ -239,7 +312,7 @@ export default function InvestorManagement({
     const selectedAccount = accounts.find(a => a.id === newInvestor.accountId) || fund;
     if (!selectedAccount) return;
 
-    const currentNav = selectedAccount.nav || 1.0000;
+    const currentNav = newInvestor.manualNav;
     const unitsToAllocate = newInvestor.investmentAmount / currentNav;
     const investorId = `INV-${Math.floor(100000 + Math.random() * 900000)}`;
 
@@ -259,6 +332,7 @@ export default function InvestorManagement({
           totalInvestment: newInvestor.investmentAmount,
           currentValue: newInvestor.investmentAmount,
           onboardDate: newInvestor.onboardDate,
+          kycStatus: newInvestor.kycStatus,
           uid: `manual_${Date.now()}`
         });
 
@@ -277,7 +351,7 @@ export default function InvestorManagement({
           units: unitsToAllocate,
           pricePerUnit: currentNav,
           totalAmount: newInvestor.investmentAmount,
-          timestamp: new Date().toISOString()
+          timestamp: new Date(newInvestor.onboardDate).toISOString()
         });
       });
 
@@ -288,6 +362,150 @@ export default function InvestorManagement({
     }
   };
 
+  const handleEditInvestor = (investor: Investor) => {
+    setEditingInvestor(investor);
+    setEditingInvestorForm({
+      name: investor.name,
+      email: investor.email || '',
+      phone: investor.phone || '',
+      investorId: investor.investorId || '',
+      kycStatus: investor.kycStatus || 'pending',
+      kycDetails: {
+        idVerified: investor.kycDetails?.idVerified || false,
+        addressVerified: investor.kycDetails?.addressVerified || false,
+        sourceOfFundsVerified: investor.kycDetails?.sourceOfFundsVerified || false
+      }
+    });
+    setIsEditInvestorModalOpen(true);
+  };
+
+  const handleUpdateInvestor = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingInvestor) return;
+
+    try {
+      const investorRef = doc(db, 'investors', editingInvestor.id);
+      await updateDoc(investorRef, {
+        name: editingInvestorForm.name,
+        email: editingInvestorForm.email,
+        phone: editingInvestorForm.phone,
+        investorId: editingInvestorForm.investorId,
+        kycStatus: editingInvestorForm.kycStatus,
+        kycDetails: editingInvestorForm.kycDetails
+      });
+      setIsEditInvestorModalOpen(false);
+      setEditingInvestor(null);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, `investors/${editingInvestor.id}`);
+    }
+  };
+
+  const handleMergeInvestors = async () => {
+    if (!selectedInvestor || !mergeTargetId || isMerging) return;
+    if (selectedInvestor.id === mergeTargetId) {
+      console.error("Cannot merge an investor with themselves");
+      return;
+    }
+
+    setIsMerging(true);
+    try {
+      const sourceId = selectedInvestor.id;
+      const targetId = mergeTargetId;
+      const targetInvestor = investors.find(i => i.id === targetId);
+      
+      if (!targetInvestor) throw new Error("Target investor not found");
+
+      // 1. Get all transactions for source investor
+      const transQuery = query(collection(db, 'transactions'), where('investorId', '==', sourceId));
+      const transSnap = await getDocs(transQuery);
+      
+      await runTransaction(db, async (dbTransaction) => {
+        const sourceRef = doc(db, 'investors', sourceId);
+        const targetRef = doc(db, 'investors', targetId);
+
+        // 2. Update target investor totals
+        dbTransaction.update(targetRef, {
+          unitsOwned: increment(selectedInvestor.unitsOwned),
+          totalInvestment: increment(selectedInvestor.totalInvestment),
+          currentValue: increment(selectedInvestor.currentValue)
+        });
+
+        // 3. Update all transactions to use target investor ID
+        transSnap.docs.forEach(transDoc => {
+          dbTransaction.update(transDoc.ref, { investorId: targetId });
+        });
+
+        // 4. Delete source investor
+        dbTransaction.delete(sourceRef);
+      });
+
+      setIsMergeModalOpen(false);
+      setSelectedInvestor(null);
+      setMergeTargetId('');
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, 'investor_merge');
+    } finally {
+      setIsMerging(false);
+    }
+  };
+
+  const handleVerifyInvestor = async (investor: Investor) => {
+    const toastId = toast.loading(`Verifying ${investor.name}...`);
+    try {
+      const ref = doc(db, 'investors', investor.id);
+      await updateDoc(ref, {
+        kycStatus: 'verified',
+        kycDetails: {
+          idVerified: true,
+          addressVerified: true,
+          sourceOfFundsVerified: true
+        }
+      });
+      toast.success(`${investor.name} verified successfully`, { id: toastId });
+    } catch (error: any) {
+      console.error("Single verify error:", error);
+      toast.error(`Verification failed: ${error.message}`, { id: toastId });
+    }
+  };
+
+  const handleBulkVerify = async () => {
+    console.log("Bulk verify triggered for IDs:", Array.from(selectedInvestorIds));
+    if (selectedInvestorIds.size === 0) {
+      toast.error("No investors selected");
+      return;
+    }
+    
+    if (!window.confirm(`Are you sure you want to verify all ${selectedInvestorIds.size} selected investors? This will set their KYC status to 'verified' and check all KYC steps.`)) {
+      return;
+    }
+
+    const toastId = toast.loading(`Verifying ${selectedInvestorIds.size} investors...`);
+    try {
+      console.log("Committing batch verify...");
+      const batch = writeBatch(db);
+      
+      selectedInvestorIds.forEach(id => {
+        const ref = doc(db, 'investors', id);
+        batch.update(ref, {
+          kycStatus: 'verified',
+          kycDetails: {
+            idVerified: true,
+            addressVerified: true,
+            sourceOfFundsVerified: true
+          }
+        });
+      });
+
+      await batch.commit();
+      console.log("Batch verify commit successful");
+      setSelectedInvestorIds(new Set());
+      toast.success("Investors verified successfully", { id: toastId });
+    } catch (error: any) {
+      console.error("Bulk verify error:", error);
+      toast.error(`Bulk verification failed: ${error.message}`, { id: toastId });
+    }
+  };
+
   const handleProcessTransaction = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedInvestor) return;
@@ -295,7 +513,7 @@ export default function InvestorManagement({
     const selectedAccount = accounts.find(a => a.id === selectedInvestor.accountId);
     if (!selectedAccount) return;
 
-    const currentNav = selectedAccount.nav || 1.0000;
+    const currentNav = transaction.manualNav;
     
     try {
       await runTransaction(db, async (dbTransaction) => {
@@ -334,12 +552,12 @@ export default function InvestorManagement({
           units: Math.abs(unitsToChange),
           pricePerUnit: currentNav,
           totalAmount: amountToChange,
-          timestamp: new Date().toISOString()
+          timestamp: new Date(transaction.timestamp).toISOString()
         });
       });
 
       setIsTransactionModalOpen(false);
-      setTransaction({ type: 'BUY', amount: 0, units: 0 });
+      setTransaction({ type: 'BUY', amount: 0, units: 0, timestamp: new Date().toISOString().split('T')[0] });
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, 'transactions');
     }
@@ -351,6 +569,7 @@ export default function InvestorManagement({
       type: t.type,
       amount: t.totalAmount,
       units: t.units,
+      pricePerUnit: t.pricePerUnit,
       timestamp: new Date(t.timestamp).toISOString().split('T')[0]
     });
     setIsEditTransactionModalOpen(true);
@@ -417,7 +636,7 @@ export default function InvestorManagement({
           type: editTransactionForm.type,
           units: editTransactionForm.units,
           totalAmount: editTransactionForm.amount,
-          pricePerUnit: editTransactionForm.units > 0 ? editTransactionForm.amount / editTransactionForm.units : 0,
+          pricePerUnit: editTransactionForm.pricePerUnit,
           timestamp: new Date(editTransactionForm.timestamp).toISOString()
         });
       });
@@ -429,27 +648,69 @@ export default function InvestorManagement({
     }
   };
 
+  const handleDeleteTransaction = async (t: Transaction) => {
+    const investor = investors.find(i => i.id === t.investorId);
+    const account = accounts.find(a => a.id === t.accountId);
+    
+    if (!investor || !account) {
+      try {
+        await deleteDoc(doc(db, 'transactions', t.id));
+      } catch (error) {
+        handleFirestoreError(error, OperationType.DELETE, `transactions/${t.id}`);
+      }
+      return;
+    }
+
+    try {
+      await runTransaction(db, async (dbTransaction) => {
+        const accountRef = doc(db, 'accounts', account.id);
+        const investorRef = doc(db, 'investors', investor.id);
+        const transRef = doc(db, 'transactions', t.id);
+
+        let unitsDelta = 0;
+        let amountDelta = 0;
+
+        if (t.type === 'BUY') {
+          unitsDelta = -t.units;
+          amountDelta = -t.totalAmount;
+        } else {
+          unitsDelta = t.units;
+          amountDelta = t.totalAmount;
+        }
+
+        dbTransaction.update(accountRef, {
+          totalUnits: increment(unitsDelta),
+          cashBalance: increment(amountDelta)
+        });
+
+        dbTransaction.update(investorRef, {
+          unitsOwned: increment(unitsDelta),
+          totalInvestment: increment(amountDelta)
+        });
+
+        dbTransaction.delete(transRef);
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, `transactions/${t.id}`);
+    }
+  };
+
   const investorPerformanceData = useMemo(() => {
     if (!selectedInvestor) return [];
 
     const investorTransactions = transactions
       .filter(t => t.investorId === selectedInvestor.id)
-      .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+      .sort((a, b) => safeTimestamp(a.timestamp) - safeTimestamp(b.timestamp));
 
     const fundValuations = valuations
       .filter(v => v.accountId === selectedInvestor.accountId)
-      .sort((a, b) => {
-        const dateA = a.date?.seconds ? a.date.seconds * 1000 : new Date(a.date).getTime();
-        const dateB = b.date?.seconds ? b.date.seconds * 1000 : new Date(b.date).getTime();
-        return dateA - dateB;
-      });
+      .sort((a, b) => safeTimestamp(a.date) - safeTimestamp(b.date));
 
     // Combine all relevant dates
     const allDates = new Set<string>();
-    investorTransactions.forEach(t => allDates.add(new Date(t.timestamp).toISOString().split('T')[0]));
+    investorTransactions.forEach(t => allDates.add(safeISODate(t.timestamp)));
     fundValuations.forEach(v => {
-      const date = v.date?.seconds ? new Date(v.date.seconds * 1000) : new Date(v.date);
-      allDates.add(date.toISOString().split('T')[0]);
+      allDates.add(safeISODate(v.date));
     });
 
     const sortedDates = Array.from(allDates).sort();
@@ -459,10 +720,10 @@ export default function InvestorManagement({
     let lastNav = accounts.find(a => a.id === selectedInvestor.accountId)?.nav || 1.0;
 
     return sortedDates.map(dateStr => {
-      const date = new Date(dateStr);
+      const date = safeDate(dateStr) || new Date();
       
       // Update units and cost basis based on transactions up to this date
-      const dayTransactions = investorTransactions.filter(t => new Date(t.timestamp).toISOString().split('T')[0] === dateStr);
+      const dayTransactions = investorTransactions.filter(t => safeISODate(t.timestamp) === dateStr);
       dayTransactions.forEach(t => {
         if (t.type === 'BUY') {
           currentUnits += t.units;
@@ -474,19 +735,13 @@ export default function InvestorManagement({
       });
 
       // Find the NAV at this date (or the latest one before it)
-      const dayValuation = fundValuations.find(v => {
-        const vDate = v.date?.seconds ? new Date(v.date.seconds * 1000) : new Date(v.date);
-        return vDate.toISOString().split('T')[0] === dateStr;
-      });
+      const dayValuation = fundValuations.find(v => safeISODate(v.date) === dateStr);
       
       if (dayValuation) {
         lastNav = dayValuation.nav;
       } else {
         // If no valuation on this exact day, find the most recent one before this date
-        const previousValuations = fundValuations.filter(v => {
-          const vDate = v.date?.seconds ? new Date(v.date.seconds * 1000) : new Date(v.date);
-          return vDate.getTime() < date.getTime();
-        });
+        const previousValuations = fundValuations.filter(v => safeTimestamp(v.date) < date.getTime());
         if (previousValuations.length > 0) {
           lastNav = previousValuations[previousValuations.length - 1].nav;
         }
@@ -497,7 +752,7 @@ export default function InvestorManagement({
       const gainLossPct = currentCostBasis > 0 ? (gainLoss / currentCostBasis) * 100 : 0;
 
       return {
-        date: date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
+        date: safeFormatDate(date, { month: 'short', day: 'numeric' }),
         totalInvestment: currentCostBasis,
         currentValue: currentValue,
         gainLossPct: gainLossPct,
@@ -553,12 +808,41 @@ export default function InvestorManagement({
             {selectedInvestorIds.size > 0 ? `Statements to Selected (${selectedInvestorIds.size})` : 'Statements to All'}
           </button>
           <button 
+            onClick={() => {
+              setSelectedInvestorForCertificate(selectedInvestorIds.size === 1 ? (selectedInvestors[0] || null) : null);
+              setIsCertificateModalOpen(true);
+            }}
+            className="bg-amber-600/20 hover:bg-amber-600/30 text-amber-300 border border-amber-500/30 px-4 py-3 rounded-xl font-semibold flex items-center gap-2 transition-all shadow-lg shadow-amber-500/10"
+            title="Design and issue official one-time membership certificates"
+          >
+            <Award className="w-5 h-5 text-amber-400" />
+            {selectedInvestorIds.size > 0 ? `Certificates to Selected (${selectedInvestorIds.size})` : 'Issue Certificates'}
+          </button>
+          <button 
             onClick={handleExportCSV}
             className="bg-slate-800 hover:bg-slate-700 text-white px-6 py-3 rounded-xl font-semibold flex items-center gap-2 transition-all border border-slate-700"
           >
             <Download className="w-5 h-5" />
             Export CSV
           </button>
+          {selectedInvestorIds.size === 2 && (
+            <button 
+              onClick={() => setIsMergeModalOpen(true)}
+              className="bg-purple-600 hover:bg-purple-500 text-white px-6 py-3 rounded-xl font-semibold flex items-center gap-2 transition-all shadow-lg shadow-purple-600/20"
+            >
+              <ArrowRightLeft className="w-5 h-5" />
+              Merge Selected
+            </button>
+          )}
+          {selectedInvestorIds.size > 0 && (
+            <button 
+              onClick={handleBulkVerify}
+              className="bg-emerald-600 hover:bg-emerald-500 text-white px-6 py-3 rounded-xl font-semibold flex items-center gap-2 transition-all shadow-lg shadow-emerald-600/20"
+            >
+              <ShieldCheck className="w-5 h-5" />
+              Verify {selectedInvestorIds.size > 1 ? `(${selectedInvestorIds.size})` : ''}
+            </button>
+          )}
           <button 
             onClick={() => setIsBulkModalOpen(true)}
             className="bg-slate-800 hover:bg-slate-700 text-white px-6 py-3 rounded-xl font-semibold flex items-center gap-2 transition-all border border-slate-700"
@@ -647,7 +931,23 @@ export default function InvestorManagement({
                         {investor.name.charAt(0)}
                       </div>
                       <div>
-                        <p className="text-sm font-semibold text-white">{investor.name}</p>
+                        <p className="text-sm font-semibold text-white flex items-center gap-2 flex-wrap">
+                          {investor.name}
+                          {investor.kycStatus === 'verified' && (
+                            <span className="bg-emerald-500/10 text-emerald-500 text-[10px] px-1.5 py-0.5 rounded-full border border-emerald-500/20">Verified</span>
+                          )}
+                          {investor.kycStatus === 'rejected' && (
+                            <span className="bg-red-500/10 text-red-500 text-[10px] px-1.5 py-0.5 rounded-full border border-red-500/20">Rejected</span>
+                          )}
+                          {(!investor.kycStatus || investor.kycStatus === 'pending') && (
+                            <span className="bg-amber-500/10 text-amber-500 text-[10px] px-1.5 py-0.5 rounded-full border border-amber-500/20">Pending</span>
+                          )}
+                          {investor.certificateIssuedAt && (
+                            <span className="bg-amber-500/10 text-amber-400 text-[10px] px-1.5 py-0.5 rounded-full border border-amber-500/20 flex items-center gap-1 font-bold" title={`Serial: ${investor.certificateSerial}`}>
+                              <Award className="w-2.5 h-2.5" /> Certified
+                            </span>
+                          )}
+                        </p>
                         <p className="text-xs text-slate-500">
                           {investor.email || 'No email'} {investor.phone ? `• ${investor.phone}` : ''}
                         </p>
@@ -677,6 +977,43 @@ export default function InvestorManagement({
                       <button 
                         onClick={() => {
                           setSelectedInvestor(investor);
+                          setTransaction(prev => ({ 
+                            ...prev, 
+                            type: 'BUY', 
+                            amount: 0, 
+                            units: 0, 
+                            useCustomNav: false,
+                            manualNav: accounts.find(a => a.id === investor.accountId)?.nav || 1.0000 
+                          }));
+                          setIsTransactionModalOpen(true);
+                        }}
+                        className="px-2 py-1 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-500 text-[10px] font-bold rounded uppercase transition-all border border-emerald-500/20" 
+                        title="Quick Buy"
+                      >
+                        Buy
+                      </button>
+                      <button 
+                        onClick={() => {
+                          setSelectedInvestor(investor);
+                          setTransaction(prev => ({ 
+                            ...prev, 
+                            type: 'SELL', 
+                            amount: 0, 
+                            units: 0, 
+                            useCustomNav: false,
+                            manualNav: accounts.find(a => a.id === investor.accountId)?.nav || 1.0000
+                          }));
+                          setIsTransactionModalOpen(true);
+                        }}
+                        className="px-2 py-1 bg-red-500/10 hover:bg-red-500/20 text-red-500 text-[10px] font-bold rounded uppercase transition-all border border-red-500/20" 
+                        title="Quick Sell"
+                      >
+                        Sell
+                      </button>
+                      <div className="w-px h-4 bg-slate-800 mx-1" />
+                      <button 
+                        onClick={() => {
+                          setSelectedInvestor(investor);
                           setIsTransactionModalOpen(true);
                         }}
                         className="p-2 hover:bg-slate-700 rounded-lg text-slate-400 hover:text-emerald-500 transition-colors" 
@@ -696,6 +1033,19 @@ export default function InvestorManagement({
                       </button>
                       <button 
                         onClick={() => {
+                          setSelectedInvestorForCertificate(investor);
+                          setIsCertificateModalOpen(true);
+                        }}
+                        className={cn(
+                          "p-2 hover:bg-slate-700 rounded-lg transition-colors",
+                          investor.certificateIssuedAt ? "text-amber-400 hover:text-amber-300" : "text-slate-400 hover:text-amber-400"
+                        )}
+                        title={investor.certificateIssuedAt ? `Certificate Issued (${investor.certificateSerial})` : "Issue Membership Certificate"}
+                      >
+                        <Award className="w-5 h-5" />
+                      </button>
+                      <button 
+                        onClick={() => {
                           setSelectedInvestor(investor);
                           setIsHistoryModalOpen(true);
                         }}
@@ -704,6 +1054,22 @@ export default function InvestorManagement({
                       >
                         <BarChart3 className="w-5 h-5" />
                       </button>
+                      <button 
+                        onClick={() => handleEditInvestor(investor)}
+                        className="p-2 hover:bg-slate-700 rounded-lg text-slate-400 hover:text-emerald-500 transition-colors" 
+                        title="Edit Investor"
+                      >
+                        <Edit3 className="w-5 h-5" />
+                      </button>
+                      {investor.kycStatus !== 'verified' && (
+                        <button 
+                          onClick={() => handleVerifyInvestor(investor)}
+                          className="p-2 hover:bg-slate-700 rounded-lg text-slate-400 hover:text-emerald-500 transition-colors" 
+                          title="Verify KYC"
+                        >
+                          <ShieldCheck className="w-5 h-5" />
+                        </button>
+                      )}
                       <button 
                         onClick={() => {
                           setSelectedInvestorForEmail(investor);
@@ -735,6 +1101,139 @@ export default function InvestorManagement({
         )}
       </div>
 
+      <AnimatePresence>
+        {isMergeModalOpen && selectedInvestors.length === 2 && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsMergeModalOpen(false)}
+              className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="relative w-full max-w-xl bg-slate-900 border border-slate-800 rounded-3xl p-8 shadow-2xl"
+            >
+              <div className="flex items-center justify-between mb-6">
+                <div className="flex items-center gap-3">
+                  <div className="w-12 h-12 bg-purple-500/10 rounded-2xl flex items-center justify-center text-purple-500">
+                    <ArrowRightLeft className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <h3 className="text-2xl font-bold text-white">Merge Investors</h3>
+                    <p className="text-slate-400 text-sm">Combine two accounts into one single entity</p>
+                  </div>
+                </div>
+                <button 
+                  onClick={() => setIsMergeModalOpen(false)}
+                  className="p-2 hover:bg-slate-800 rounded-xl text-slate-400 transition-colors"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="space-y-6">
+                <div className="bg-amber-500/10 border border-amber-500/20 p-4 rounded-2xl flex gap-4">
+                  <AlertTriangle className="w-6 h-6 text-amber-500 shrink-0" />
+                  <div>
+                    <p className="text-sm font-bold text-amber-500">Irreversible Action</p>
+                    <p className="text-xs text-amber-500/80 mt-1">
+                      Merging will move all transaction history from the Source to the Target investor. 
+                      The Source investor profile will be permanently deleted.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-4">
+                    <label className="text-[10px] uppercase font-bold tracking-wider text-slate-500">Source Investor (To be deleted)</label>
+                    <div className="p-4 bg-slate-800/50 rounded-2xl border border-slate-700">
+                      <p className="text-white font-bold">{selectedInvestors[0].name}</p>
+                      <p className="text-xs text-slate-500 mt-1">{selectedInvestors[0].investorId}</p>
+                      <div className="mt-4 pt-4 border-t border-slate-700/50">
+                        <p className="text-[10px] text-slate-500 uppercase font-bold tracking-wider">Units to move</p>
+                        <p className="text-sm text-slate-300">{selectedInvestors[0].unitsOwned.toLocaleString()}</p>
+                      </div>
+                    </div>
+                    <button 
+                      onClick={() => {
+                        // Swap source and target for selection
+                        const source = selectedInvestors[0];
+                        const target = selectedInvestors[1];
+                        setSelectedInvestor(source);
+                        setMergeTargetId(target.id);
+                      }}
+                      className={cn(
+                        "w-full py-2 px-3 rounded-lg text-xs font-bold transition-all border",
+                        selectedInvestor?.id === selectedInvestors[0].id 
+                          ? "bg-purple-600 border-purple-500 text-white shadow-lg shadow-purple-600/20" 
+                          : "bg-slate-800 border-slate-700 text-slate-400 hover:text-white"
+                      )}
+                    >
+                      Set as Source
+                    </button>
+                  </div>
+
+                  <div className="space-y-4">
+                    <label className="text-[10px] uppercase font-bold tracking-wider text-slate-500">Target Investor (Data remains)</label>
+                    <div className="p-4 bg-slate-800/50 rounded-2xl border border-slate-700">
+                      <p className="text-white font-bold">{selectedInvestors[1].name}</p>
+                      <p className="text-xs text-slate-500 mt-1">{selectedInvestors[1].investorId}</p>
+                      <div className="mt-4 pt-4 border-t border-slate-700/50">
+                        <p className="text-[10px] text-slate-500 uppercase font-bold tracking-wider">Destination</p>
+                        <p className="text-sm text-slate-300">{selectedInvestors[1].unitsOwned.toLocaleString()} units initial</p>
+                      </div>
+                    </div>
+                    <button 
+                      onClick={() => {
+                        // Swap source and target for selection
+                        const source = selectedInvestors[1];
+                        const target = selectedInvestors[0];
+                        setSelectedInvestor(source);
+                        setMergeTargetId(target.id);
+                      }}
+                      className={cn(
+                        "w-full py-2 px-3 rounded-lg text-xs font-bold transition-all border",
+                        selectedInvestor?.id === selectedInvestors[1].id 
+                          ? "bg-purple-600 border-purple-500 text-white shadow-lg shadow-purple-600/20" 
+                          : "bg-slate-800 border-slate-700 text-slate-400 hover:text-white"
+                      )}
+                    >
+                      Set as Source
+                    </button>
+                  </div>
+                </div>
+
+                {!selectedInvestor && (
+                  <p className="text-center text-sm text-slate-500 italic">Please select which investor will be the <b>Source</b> (the one being merged away).</p>
+                )}
+
+                <div className="flex gap-4 pt-4">
+                  <button 
+                    type="button"
+                    onClick={() => setIsMergeModalOpen(false)}
+                    className="flex-1 py-3 px-4 bg-slate-800 hover:bg-slate-700 text-white font-semibold rounded-xl transition-all"
+                  >
+                    Cancel
+                  </button>
+                  <button 
+                    onClick={handleMergeInvestors}
+                    disabled={!selectedInvestor || isMerging}
+                    className="flex-1 py-3 px-4 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white font-semibold rounded-xl transition-all shadow-lg shadow-purple-600/20 flex items-center justify-center gap-2"
+                  >
+                    {isMerging ? <Loader2 className="w-5 h-5 animate-spin" /> : <ArrowRightLeft className="w-5 h-5" />}
+                    {isMerging ? 'Merging Account...' : 'Confirm Merge'}
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
       <BulkEmailModal 
         isOpen={isBulkEmailModalOpen}
         onClose={() => setIsBulkEmailModalOpen(false)}
@@ -763,6 +1262,155 @@ export default function InvestorManagement({
         fund={accounts.find(a => a.id === selectedInvestorForEmail?.accountId) || null}
         isGmailConnected={isGmailConnected}
       />
+
+      <AnimatePresence>
+        {isEditInvestorModalOpen && editingInvestor && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsEditInvestorModalOpen(false)}
+              className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="relative w-full max-w-lg bg-slate-900 border border-slate-800 rounded-3xl p-8 shadow-2xl"
+            >
+              <div className="flex items-center justify-between mb-6">
+                <h3 className="text-2xl font-bold text-white">Edit Investor Details</h3>
+                <button 
+                  onClick={() => setIsEditInvestorModalOpen(false)}
+                  className="p-2 hover:bg-slate-800 rounded-xl text-slate-400 transition-colors"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+              <form onSubmit={handleUpdateInvestor} className="space-y-6">
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-slate-400">Full Name</label>
+                  <input 
+                    required
+                    type="text" 
+                    value={editingInvestorForm.name}
+                    onChange={(e) => setEditingInvestorForm({...editingInvestorForm, name: e.target.value})}
+                    className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-slate-400">Investor ID</label>
+                  <input 
+                    required
+                    type="text" 
+                    value={editingInvestorForm.investorId}
+                    onChange={(e) => setEditingInvestorForm({...editingInvestorForm, investorId: e.target.value})}
+                    className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all font-mono"
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-6">
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium text-slate-400">Email Address</label>
+                    <input 
+                      type="email" 
+                      value={editingInvestorForm.email}
+                      onChange={(e) => setEditingInvestorForm({...editingInvestorForm, email: e.target.value})}
+                      className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium text-slate-400">Phone Number</label>
+                    <input 
+                      type="tel" 
+                      value={editingInvestorForm.phone}
+                      onChange={(e) => setEditingInvestorForm({...editingInvestorForm, phone: e.target.value})}
+                      className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
+                    />
+                  </div>
+                </div>
+                <div className="space-y-4 p-4 bg-slate-800/50 rounded-2xl border border-slate-700">
+                  <label className="text-sm font-medium text-slate-400 block mb-2">Multi-Step KYC Verification</label>
+                  <div className="space-y-3">
+                    <label className="flex items-center gap-3 cursor-pointer group">
+                      <div className="relative flex items-center justify-center">
+                        <input 
+                          type="checkbox"
+                          checked={editingInvestorForm.kycDetails.idVerified}
+                          onChange={(e) => setEditingInvestorForm({
+                            ...editingInvestorForm, 
+                            kycDetails: { ...editingInvestorForm.kycDetails, idVerified: e.target.checked }
+                          })}
+                          className="w-5 h-5 rounded border-slate-600 bg-slate-700 text-emerald-500 focus:ring-emerald-500 focus:ring-offset-slate-900"
+                        />
+                      </div>
+                      <span className="text-sm text-slate-300 group-hover:text-white transition-colors">Identity Document Verified (Passport/ID)</span>
+                    </label>
+                    
+                    <label className="flex items-center gap-3 cursor-pointer group">
+                      <div className="relative flex items-center justify-center">
+                        <input 
+                          type="checkbox"
+                          checked={editingInvestorForm.kycDetails.addressVerified}
+                          onChange={(e) => setEditingInvestorForm({
+                            ...editingInvestorForm, 
+                            kycDetails: { ...editingInvestorForm.kycDetails, addressVerified: e.target.checked }
+                          })}
+                          className="w-5 h-5 rounded border-slate-600 bg-slate-700 text-emerald-500 focus:ring-emerald-500 focus:ring-offset-slate-900"
+                        />
+                      </div>
+                      <span className="text-sm text-slate-300 group-hover:text-white transition-colors">Residential Address Verified</span>
+                    </label>
+
+                    <label className="flex items-center gap-3 cursor-pointer group">
+                      <div className="relative flex items-center justify-center">
+                        <input 
+                          type="checkbox"
+                          checked={editingInvestorForm.kycDetails.sourceOfFundsVerified}
+                          onChange={(e) => setEditingInvestorForm({
+                            ...editingInvestorForm, 
+                            kycDetails: { ...editingInvestorForm.kycDetails, sourceOfFundsVerified: e.target.checked }
+                          })}
+                          className="w-5 h-5 rounded border-slate-600 bg-slate-700 text-emerald-500 focus:ring-emerald-500 focus:ring-offset-slate-900"
+                        />
+                      </div>
+                      <span className="text-sm text-slate-300 group-hover:text-white transition-colors">Source of Funds Verified</span>
+                    </label>
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-slate-400">Final KYC Approval Status</label>
+                  <select 
+                    value={editingInvestorForm.kycStatus}
+                    onChange={(e) => setEditingInvestorForm({...editingInvestorForm, kycStatus: e.target.value as any})}
+                    className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
+                  >
+                    <option value="pending">Pending</option>
+                    <option value="verified">Verified</option>
+                    <option value="rejected">Rejected</option>
+                  </select>
+                </div>
+                <div className="flex gap-4 pt-4">
+                  <button 
+                    type="button"
+                    onClick={() => setIsEditInvestorModalOpen(false)}
+                    className="flex-1 py-3 px-4 bg-slate-800 hover:bg-slate-700 text-white font-semibold rounded-xl transition-all"
+                  >
+                    Cancel
+                  </button>
+                  <button 
+                    type="submit"
+                    className="flex-1 py-3 px-4 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold rounded-xl transition-all shadow-lg shadow-emerald-600/20"
+                  >
+                    Save Changes
+                  </button>
+                </div>
+              </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
 
       {/* Add Investor Modal */}
       <AnimatePresence>
@@ -839,9 +1487,58 @@ export default function InvestorManagement({
                     className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
                     placeholder="0.00"
                   />
-                  <p className="text-[10px] text-slate-500 italic">
-                    Units will be allocated based on current NAV: {formatCurrency(accounts.find(a => a.id === newInvestor.accountId)?.nav || 1.0000)}
-                  </p>
+                  
+                  <div className="mt-4 p-4 bg-slate-800/50 rounded-2xl border border-slate-700 space-y-4">
+                    <div className="flex items-center justify-between">
+                      <label className="text-sm font-medium text-slate-400">Transaction Price (NAV)</label>
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <span className="text-xs text-slate-500">Override NAV</span>
+                        <input 
+                          type="checkbox"
+                          checked={newInvestor.useCustomNav}
+                          onChange={(e) => setNewInvestor({
+                            ...newInvestor, 
+                            useCustomNav: e.target.checked,
+                            manualNav: e.target.checked ? (accounts.find(a => a.id === newInvestor.accountId)?.nav || 1.0000) : 1.0000
+                          })}
+                          className="w-4 h-4 rounded border-slate-600 bg-slate-700 text-emerald-500 focus:ring-emerald-500"
+                        />
+                      </label>
+                    </div>
+
+                    {newInvestor.useCustomNav ? (
+                      <div className="relative">
+                        <DollarSign className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+                        <input 
+                          type="number"
+                          step="0.0001"
+                          value={newInvestor.manualNav}
+                          onChange={(e) => setNewInvestor({...newInvestor, manualNav: Number(e.target.value)})}
+                          className="w-full bg-slate-900 border border-slate-700 rounded-xl pl-10 pr-4 py-2 text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
+                        />
+                      </div>
+                    ) : (
+                      <div className="flex items-center justify-between">
+                        <p className="text-[10px] text-slate-500 italic">
+                          {safeISODate(newInvestor.onboardDate) === safeISODate(new Date()) 
+                            ? 'Current NAV will be used:' 
+                            : 'Historical NAV for this date:'} {formatCurrency(newInvestor.manualNav)}
+                        </p>
+                        {safeISODate(newInvestor.onboardDate) !== safeISODate(new Date()) && (
+                          <span className="text-[8px] bg-blue-500/10 text-blue-500 px-1.5 py-0.5 rounded border border-blue-500/20 font-bold uppercase tracking-widest">
+                            Smart Date Applied
+                          </span>
+                        )}
+                      </div>
+                    )}
+
+                    <div className="pt-2 border-t border-slate-700/50 flex justify-between items-center text-xs">
+                      <span className="text-slate-500">Units to be allocated:</span>
+                      <span className="text-emerald-500 font-bold">
+                        {(newInvestor.investmentAmount / newInvestor.manualNav).toLocaleString(undefined, { maximumFractionDigits: 4 })}
+                      </span>
+                    </div>
+                  </div>
                 </div>
                 <div className="space-y-2">
                   <label className="text-sm font-medium text-slate-400">Onboarding Date (Optional)</label>
@@ -852,6 +1549,18 @@ export default function InvestorManagement({
                     className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
                   />
                   <p className="text-[10px] text-slate-500 italic">Used as a reference for starting investment statements.</p>
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-slate-400">KYC Status</label>
+                  <select 
+                    value={newInvestor.kycStatus}
+                    onChange={(e) => setNewInvestor({...newInvestor, kycStatus: e.target.value as any})}
+                    className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
+                  >
+                    <option value="pending">Pending</option>
+                    <option value="verified">Verified</option>
+                    <option value="rejected">Rejected</option>
+                  </select>
                 </div>
                 <div className="flex gap-4 pt-4">
                   <button 
@@ -943,7 +1652,7 @@ export default function InvestorManagement({
                       />
                     </div>
                     <p className="text-[10px] text-slate-500 italic">
-                      Estimated Units: {(transaction.amount / (accounts.find(a => a.id === selectedInvestor.accountId)?.nav || 1)).toLocaleString(undefined, { maximumFractionDigits: 4 })}
+                      Estimated Units: {(transaction.amount / (transaction.useCustomNav ? transaction.manualNav : (accounts.find(a => a.id === selectedInvestor.accountId)?.nav || 1))).toLocaleString(undefined, { maximumFractionDigits: 4 })}
                     </p>
                   </div>
                 ) : (
@@ -962,17 +1671,75 @@ export default function InvestorManagement({
                       />
                     </div>
                     <p className="text-[10px] text-slate-500 italic">
-                      Available Units: {selectedInvestor.unitsOwned.toLocaleString()} | Estimated Payout: {formatCurrency(transaction.units * (accounts.find(a => a.id === selectedInvestor.accountId)?.nav || 1))}
+                      Available Units: {selectedInvestor.unitsOwned.toLocaleString()} | Estimated Payout: {formatCurrency(transaction.units * (transaction.useCustomNav ? transaction.manualNav : (accounts.find(a => a.id === selectedInvestor.accountId)?.nav || 1)))}
                     </p>
                   </div>
                 )}
 
-                <div className="bg-slate-800/50 border border-slate-800 p-4 rounded-2xl">
-                  <div className="flex justify-between text-xs mb-1">
-                    <span className="text-slate-500">Current NAV</span>
-                    <span className="text-white font-bold">{formatCurrency(accounts.find(a => a.id === selectedInvestor.accountId)?.nav || 1.0000)}</span>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-slate-400">Transaction Date</label>
+                  <div className="relative">
+                    <Calendar className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+                    <input 
+                      required
+                      type="date" 
+                      value={transaction.timestamp}
+                      onChange={(e) => setTransaction({...transaction, timestamp: e.target.value})}
+                      className="w-full bg-slate-800 border border-slate-700 rounded-xl pl-12 pr-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
+                    />
                   </div>
-                  <div className="flex justify-between text-xs">
+                </div>
+
+                <div className="bg-slate-800/50 border border-slate-800 p-4 rounded-2xl space-y-4">
+                  <div className="flex items-center justify-between">
+                    <label className="text-sm font-medium text-slate-400">Unit Price (NAV)</label>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <span className="text-xs text-slate-500">Override NAV</span>
+                      <input 
+                        type="checkbox"
+                        checked={transaction.useCustomNav}
+                        onChange={(e) => setTransaction({
+                          ...transaction, 
+                          useCustomNav: e.target.checked,
+                          manualNav: e.target.checked ? (accounts.find(a => a.id === selectedInvestor.accountId)?.nav || 1.0000) : 1.0000
+                        })}
+                        className="w-4 h-4 rounded border-slate-600 bg-slate-700 text-emerald-500 focus:ring-emerald-500"
+                      />
+                    </label>
+                  </div>
+
+                  {transaction.useCustomNav ? (
+                    <div className="relative">
+                      <DollarSign className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+                      <input 
+                        type="number"
+                        step="0.0001"
+                        value={transaction.manualNav}
+                        onChange={(e) => setTransaction({...transaction, manualNav: Number(e.target.value)})}
+                        className="w-full bg-slate-900 border border-slate-700 rounded-xl pl-10 pr-4 py-2 text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
+                      />
+                    </div>
+                  ) : (
+                    <div className="flex flex-col gap-1">
+                      <div className="flex justify-between text-xs items-center">
+                        <span className="text-slate-500">
+                          {safeISODate(transaction.timestamp) === safeISODate(new Date()) 
+                            ? 'System NAV' 
+                            : 'Historical NAV'}
+                        </span>
+                        <span className="text-white font-bold">{formatCurrency(transaction.manualNav)}</span>
+                      </div>
+                      {safeISODate(transaction.timestamp) !== safeISODate(new Date()) && (
+                        <div className="flex justify-end">
+                          <span className="text-[8px] bg-blue-500/10 text-blue-500 px-1.5 py-0.5 rounded border border-blue-500/20 font-bold uppercase tracking-widest">
+                            Smart Date Applied
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  <div className="pt-2 border-t border-slate-700/50 flex justify-between items-center text-xs">
                     <span className="text-slate-500">Account</span>
                     <span className="text-white font-bold">{accounts.find(a => a.id === selectedInvestor.accountId)?.name}</span>
                   </div>
@@ -1154,6 +1921,7 @@ export default function InvestorManagement({
                 investors={investors} 
                 filterByInvestorId={selectedInvestor.id}
                 onEditTransaction={handleEditTransaction}
+                onDeleteTransaction={handleDeleteTransaction}
                 title="Investor Transactions"
               />
             </motion.div>
@@ -1168,6 +1936,7 @@ export default function InvestorManagement({
           accounts={accounts} 
           investors={investors} 
           onEditTransaction={handleEditTransaction}
+          onDeleteTransaction={handleDeleteTransaction}
           title="Recent Fund Transactions"
         />
       </div>
@@ -1177,6 +1946,7 @@ export default function InvestorManagement({
         onClose={() => setIsBulkModalOpen(false)}
         investors={investors}
         accounts={accounts}
+        valuations={valuations}
       />
 
       <StatementModal 
@@ -1259,7 +2029,14 @@ export default function InvestorManagement({
                       type="number" 
                       step="0.000001"
                       value={editTransactionForm.units}
-                      onChange={(e) => setEditTransactionForm({...editTransactionForm, units: Number(e.target.value)})}
+                      onChange={(e) => {
+                        const newUnits = Number(e.target.value);
+                        setEditTransactionForm({
+                          ...editTransactionForm, 
+                          units: newUnits,
+                          amount: newUnits * editTransactionForm.pricePerUnit
+                        });
+                      }}
                       className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none"
                     />
                   </div>
@@ -1270,16 +2047,40 @@ export default function InvestorManagement({
                       type="number" 
                       step="0.01"
                       value={editTransactionForm.amount}
-                      onChange={(e) => setEditTransactionForm({...editTransactionForm, amount: Number(e.target.value)})}
+                      onChange={(e) => {
+                        const newAmount = Number(e.target.value);
+                        setEditTransactionForm({
+                          ...editTransactionForm, 
+                          amount: newAmount,
+                          units: editTransactionForm.pricePerUnit > 0 ? newAmount / editTransactionForm.pricePerUnit : 0
+                        });
+                      }}
                       className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none"
                     />
                   </div>
                 </div>
 
                 <div className="space-y-2">
-                  <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">Effective Price Per Unit</label>
-                  <div className="bg-slate-900 border border-slate-800 px-4 py-3 rounded-xl text-emerald-400 font-mono font-bold">
-                    {formatCurrency(editTransactionForm.units > 0 ? editTransactionForm.amount / editTransactionForm.units : 0)}
+                  <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">Transaction Price (NAV)</label>
+                  <div className="relative">
+                    <DollarSign className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+                    <input 
+                      required
+                      type="number" 
+                      step="0.0001"
+                      value={editTransactionForm.pricePerUnit}
+                      onChange={(e) => {
+                        const newPrice = Number(e.target.value);
+                        // If we change price, we might want to keep amount fixed and adjust units, or vice versa.
+                        // Common behavior: keep amount fixed, update units.
+                        setEditTransactionForm({
+                          ...editTransactionForm, 
+                          pricePerUnit: newPrice,
+                          units: newPrice > 0 ? editTransactionForm.amount / newPrice : 0
+                        });
+                      }}
+                      className="w-full bg-slate-800 border border-slate-700 rounded-xl pl-11 pr-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none"
+                    />
                   </div>
                 </div>
 
@@ -1317,6 +2118,16 @@ export default function InvestorManagement({
           </div>
         )}
       </AnimatePresence>
+
+      {/* Membership Certificate Modal */}
+      <MembershipCertificateModal
+        isOpen={isCertificateModalOpen}
+        onClose={() => setIsCertificateModalOpen(false)}
+        investor={selectedInvestorForCertificate}
+        investorsList={selectedInvestorIds.size > 0 ? selectedInvestors : filteredInvestors}
+        fund={fund}
+        isGmailConnected={isGmailConnected}
+      />
     </div>
   );
 }

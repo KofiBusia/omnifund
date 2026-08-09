@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
-import { Toaster } from 'sonner';
+import { Toaster, toast } from 'sonner';
 import { 
   LayoutDashboard, 
   Users, 
@@ -15,7 +15,9 @@ import {
   FileText,
   Activity,
   RefreshCcw,
-  Cpu
+  Cpu,
+  Download,
+  Database
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
@@ -70,6 +72,43 @@ export default function App() {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [valuations, setValuations] = useState<Valuation[]>([]);
   const [revertedValuations, setRevertedValuations] = useState<any[]>([]);
+  const [isBackingUp, setIsBackingUp] = useState(false);
+
+  const handleDownloadBackup = () => {
+    setIsBackingUp(true);
+    const toastId = toast.loading("Preparing comprehensive system backup...");
+
+    setTimeout(() => {
+      try {
+        const backupData = {
+          version: "1.0.0",
+          exportedAt: new Date().toISOString(),
+          accounts: accounts,
+          portfolio: portfolio,
+          investors: investors,
+          transactions: transactions,
+          valuations: valuations,
+          revertedValuations: revertedValuations
+        };
+
+        const jsonString = `data:text/json;charset=utf-8,${encodeURIComponent(
+          JSON.stringify(backupData, null, 2)
+        )}`;
+        const downloadAnchor = document.createElement('a');
+        downloadAnchor.setAttribute("href", jsonString);
+        downloadAnchor.setAttribute("download", `OmniFund_System_Backup_${new Date().toISOString().split('T')[0]}.json`);
+        document.body.appendChild(downloadAnchor);
+        downloadAnchor.click();
+        downloadAnchor.remove();
+
+        toast.success("Database backup downloaded successfully", { id: toastId });
+      } catch (err: any) {
+        toast.error(`Backup extraction failed: ${err.message}`, { id: toastId });
+      } finally {
+        setIsBackingUp(false);
+      }
+    }, 1500);
+  };
 
   // Derived active account (for simplicity, use the first one if none selected)
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
@@ -277,7 +316,25 @@ export default function App() {
           ))}
         </nav>
 
-        <div className="p-4 border-t border-slate-800">
+        <div className="p-4 border-t border-slate-800 space-y-2">
+          {role === 'admin' && (
+            <button 
+              onClick={handleDownloadBackup}
+              disabled={isBackingUp}
+              className="w-full flex items-center gap-3 px-4 py-3 text-amber-400 hover:text-amber-300 hover:bg-amber-400/5 rounded-xl transition-all font-medium disabled:opacity-50"
+            >
+              {isBackingUp ? (
+                <motion.div
+                  animate={{ rotate: 360 }}
+                  transition={{ repeat: Infinity, duration: 1, ease: "linear" }}
+                  className="w-5 h-5 border-2 border-amber-400 border-t-transparent rounded-full"
+                />
+              ) : (
+                <Database className="w-5 h-5 text-amber-500" />
+              )}
+              {isSidebarOpen && <span>System Backup</span>}
+            </button>
+          )}
           <button 
             onClick={handleLogout}
             className="w-full flex items-center gap-3 px-4 py-3 text-slate-400 hover:text-red-400 hover:bg-red-400/5 rounded-xl transition-all"
@@ -355,9 +412,12 @@ export default function App() {
                   investors={activeInvestors} 
                   portfolio={activePortfolio}
                   valuations={activeValuations}
+                  onDownloadBackup={handleDownloadBackup}
+                  isBackingUp={isBackingUp}
+                  role={role}
                 />
               )}
-              {activeTab === 'accounts' && <AccountManagement accounts={accounts} investors={investors} portfolio={portfolio} transactions={transactions} />}
+              {activeTab === 'accounts' && <AccountManagement accounts={accounts} investors={investors} portfolio={portfolio} transactions={transactions} valuations={valuations} />}
               {activeTab === 'investors' && (
                 <InvestorManagement 
                   investors={investors} 

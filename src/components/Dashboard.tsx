@@ -39,11 +39,22 @@ interface DashboardProps {
   investors: Investor[];
   portfolio: Asset[];
   valuations: Valuation[];
+  onDownloadBackup?: () => void;
+  isBackingUp?: boolean;
+  role?: 'admin' | 'investor' | null;
 }
 
 const COLORS = ['#10b981', '#3b82f6', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899'];
 
-export default function Dashboard({ fund, investors, portfolio, valuations }: DashboardProps) {
+export default function Dashboard({ 
+  fund, 
+  investors, 
+  portfolio, 
+  valuations,
+  onDownloadBackup,
+  isBackingUp = false,
+  role
+}: DashboardProps) {
   const [isReconciling, setIsReconciling] = useState(false);
 
   const handleFixBalance = async () => {
@@ -170,9 +181,22 @@ export default function Dashboard({ fund, investors, portfolio, valuations }: Da
   return (
     <div className="space-y-8">
       <div className="flex items-end justify-between">
-        <div>
-          <h2 className="text-3xl font-bold text-white">Dashboard Overview</h2>
-          <p className="text-slate-400 mt-1">Real-time fund performance and metrics</p>
+        <div className="flex items-start gap-4 flex-wrap sm:flex-nowrap">
+          <div>
+            <h2 className="text-3xl font-bold text-white">Dashboard Overview</h2>
+            <p className="text-slate-400 mt-1">Real-time fund performance and metrics</p>
+          </div>
+          {role === 'admin' && onDownloadBackup && (
+            <button
+              onClick={onDownloadBackup}
+              disabled={isBackingUp}
+              className="bg-amber-600/10 hover:bg-amber-600/20 text-amber-500 border border-amber-500/20 px-3.5 py-1.5 rounded-xl font-medium flex items-center gap-2 transition-all text-xs disabled:opacity-50 mt-1"
+              title="Backup complete database"
+            >
+              {isBackingUp ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Table className="w-3.5 h-3.5" />}
+              Backup Database
+            </button>
+          )}
         </div>
         <div className="text-right flex flex-col items-end">
           <div className="flex items-center gap-3 mb-1">

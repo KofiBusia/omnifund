@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { Transaction, InvestmentAccount, Investor } from '../types';
-import { formatCurrency, cn } from '../lib/utils';
+import { formatCurrency, cn, safeDate, safeFormatDate, safeTimestamp } from '../lib/utils';
 import { 
   Search, 
   Filter, 
@@ -10,10 +10,14 @@ import {
   ArrowUpDown,
   X,
   Download,
-  Edit3
+  Trash2,
+  Edit3,
+  AlertTriangle,
+  Loader2
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import Papa from 'papaparse';
+import { toast } from 'sonner';
 
 interface TransactionHistoryProps {
   transactions: Transaction[];
@@ -21,7 +25,9 @@ interface TransactionHistoryProps {
   investors: Investor[];
   filterByAccountId?: string;
   filterByInvestorId?: string;
+  highlightedId?: string | null;
   onEditTransaction?: (transaction: Transaction) => void;
+  onDeleteTransaction?: (transaction: Transaction) => void;
   title?: string;
 }
 
@@ -34,7 +40,9 @@ export default function TransactionHistory({
   investors,
   filterByAccountId,
   filterByInvestorId,
+  highlightedId,
   onEditTransaction,
+  onDeleteTransaction,
   title = "Transaction History"
 }: TransactionHistoryProps) {
   const [searchTerm, setSearchTerm] = useState('');
@@ -45,6 +53,19 @@ export default function TransactionHistory({
   const [sortOrder, setSortOrder] = useState<SortOrder>('desc');
   const [isFilterOpen, setIsFilterOpen] = useState(false);
   const [, setTick] = useState(0);
+  
+  const [transactionToDelete, setTransactionToDelete] = useState<Transaction | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
+
+  // Handle highlighting
+  useEffect(() => {
+    if (highlightedId) {
+      const element = document.getElementById(`tx-${highlightedId}`);
+      if (element) {
+        element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    }
+  }, [highlightedId]);
 
   // Re-render every 10 seconds to update 'NEW' badges
   useEffect(() => {
@@ -76,11 +97,17 @@ export default function TransactionHistory({
       if (typeFilter !== 'ALL' && t.type !== typeFilter) return false;
 
       // Filter by date range
-      if (dateRange.start && new Date(t.timestamp) < new Date(dateRange.start)) return false;
+      const tDate = safeDate(t.timestamp);
+      if (dateRange.start) {
+        const startDate = safeDate(dateRange.start);
+        if (startDate && (!tDate || tDate < startDate)) return false;
+      }
       if (dateRange.end) {
-        const endDate = new Date(dateRange.end);
-        endDate.setHours(23, 59, 59, 999);
-        if (new Date(t.timestamp) > endDate) return false;
+        const endDate = safeDate(dateRange.end);
+        if (endDate) {
+          endDate.setHours(23, 59, 59, 999);
+          if (!tDate || tDate > endDate) return false;
+        }
       }
 
       // Search by investor name or account name
@@ -100,8 +127,8 @@ export default function TransactionHistory({
       let valB: any = b[sortField];
 
       if (sortField === 'timestamp') {
-        valA = new Date(valA).getTime();
-        valB = new Date(valB).getTime();
+        valA = safeTimestamp(valA);
+        valB = safeTimestamp(valB);
       }
 
       if (valA < valB) return sortOrder === 'asc' ? -1 : 1;
@@ -147,6 +174,23 @@ export default function TransactionHistory({
     } else {
       setSortField(field);
       setSortOrder('desc');
+    }
+  };
+
+  const handleDeleteConfirm = async () => {
+    if (!transactionToDelete || !onDeleteTransaction) return;
+    
+    setIsDeleting(true);
+    const toastId = toast.loading("Deleting transaction and reconciling balances...");
+    
+    try {
+      await onDeleteTransaction(transactionToDelete);
+      toast.success("Transaction deleted successfully", { id: toastId });
+      setTransactionToDelete(null);
+    } catch (error: any) {
+      toast.error(`Deletion failed: ${error.message}`, { id: toastId });
+    } finally {
+      setIsDeleting(false);
     }
   };
 
@@ -304,14 +348,15 @@ export default function TransactionHistory({
                   </div>
                 </th>
                 <th className="px-6 py-4 text-xs font-semibold text-slate-400 uppercase tracking-wider text-right">Price/Unit</th>
-                {onEditTransaction && <th className="px-6 py-4 text-xs font-semibold text-slate-400 uppercase tracking-wider text-right">Actions</th>}
+                {(onEditTransaction || onDeleteTransaction) && <th className="px-6 py-4 text-xs font-semibold text-slate-400 uppercase tracking-wider text-right">Actions</th>}
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800">
               {filteredAndSortedTransactions.map((t) => {
                 const investor = lookups.investorMap.get(t.investorId);
                 const account = lookups.accountMap.get(t.accountId);
-                const isNew = (Date.now() - new Date(t.timestamp).getTime()) < 30000; // 30 seconds
+                const tDate = safeDate(t.timestamp);
+                const isNew = tDate ? (Date.now() - tDate.getTime() < 30000) : false;
                 
                 return (
                   <motion.tr 
@@ -320,24 +365,30 @@ export default function TransactionHistory({
                     animate={{ 
                       opacity: 1, 
                       x: 0,
-                      backgroundColor: isNew ? 'rgba(16, 185, 129, 0.05)' : 'transparent'
+                      backgroundColor: highlightedId === t.id ? 'rgba(59, 130, 246, 0.1)' : (isNew ? 'rgba(16, 185, 129, 0.05)' : 'transparent'),
+                      outline: highlightedId === t.id ? '2px solid rgba(59, 130, 246, 0.5)' : 'none'
                     }}
                     key={t.id} 
-                    className="hover:bg-slate-800/30 transition-colors relative overflow-hidden"
+                    id={`tx-${t.id}`}
+                    className={cn(
+                      "hover:bg-slate-800/30 transition-colors relative overflow-hidden",
+                      highlightedId === t.id ? "z-10 shadow-lg" : ""
+                    )}
                   >
                     <td className="px-6 py-4">
                       <div className="flex flex-col relative">
                         {isNew && (
                           <div className="absolute -left-4 top-1/2 -translate-y-1/2 w-1 h-4 bg-emerald-500 rounded-full shadow-[0_0_10px_rgba(16,185,129,0.5)]" />
                         )}
-                        <span className="text-sm text-slate-300 font-medium flex items-center gap-2">
-                          {new Date(t.timestamp).toLocaleDateString()}
+                        <span className="text-sm text-slate-300 font-medium flex items-baseline gap-2">
+                          {safeFormatDate(t.timestamp)}
+                          <span className="text-[10px] text-emerald-500 font-mono font-bold">@{formatCurrency(t.pricePerUnit)}</span>
                           {isNew && (
                             <span className="text-[8px] bg-emerald-500 text-white px-1 rounded font-bold animate-pulse">NEW</span>
                           )}
                         </span>
                         <span className="text-[10px] text-slate-500">
-                          {new Date(t.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                          {tDate ? tDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'N/A'}
                         </span>
                       </div>
                     </td>
@@ -365,15 +416,28 @@ export default function TransactionHistory({
                     <td className="px-6 py-4 text-right">
                       <span className="text-xs text-slate-500 font-medium">{formatCurrency(t.pricePerUnit)}</span>
                     </td>
-                    {onEditTransaction && (
+                    {(onEditTransaction || onDeleteTransaction) && (
                       <td className="px-6 py-4 text-right">
-                        <button 
-                          onClick={() => onEditTransaction(t)}
-                          className="p-1.5 hover:bg-slate-700 rounded-lg text-slate-400 hover:text-emerald-500 transition-colors"
-                          title="Edit Transaction"
-                        >
-                          <Edit3 className="w-4 h-4" />
-                        </button>
+                        <div className="flex items-center justify-end gap-2">
+                          {onEditTransaction && (
+                            <button 
+                              onClick={() => onEditTransaction(t)}
+                              className="p-1.5 hover:bg-slate-700 rounded-lg text-slate-400 hover:text-emerald-500 transition-colors"
+                              title="Edit Transaction"
+                            >
+                              <Edit3 className="w-4 h-4" />
+                            </button>
+                          )}
+                          {onDeleteTransaction && (
+                            <button 
+                              onClick={() => setTransactionToDelete(t)}
+                              className="p-1.5 hover:bg-slate-700 rounded-lg text-slate-400 hover:text-red-500 transition-colors"
+                              title="Delete Transaction"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          )}
+                        </div>
                       </td>
                     )}
                   </motion.tr>
@@ -389,6 +453,53 @@ export default function TransactionHistory({
           )}
         </div>
       </div>
+      <AnimatePresence>
+        {transactionToDelete && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => !isDeleting && setTransactionToDelete(null)}
+              className="absolute inset-0 bg-slate-950/90 backdrop-blur-md"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="relative w-full max-w-md bg-slate-900 border border-slate-800 rounded-3xl p-8 shadow-2xl"
+            >
+              <div className="w-16 h-16 bg-red-500/10 rounded-2xl flex items-center justify-center mb-6 mx-auto">
+                <AlertTriangle className="w-8 h-8 text-red-500" />
+              </div>
+              <h3 className="text-2xl font-bold text-white text-center mb-2">Delete Transaction?</h3>
+              <p className="text-slate-400 text-center mb-8">
+                Are you sure you want to delete this {transactionToDelete.type === 'BUY' ? 'Subscription' : 'Redemption'} of {formatCurrency(transactionToDelete.totalAmount)}?
+                <br /><br />
+                <span className="text-xs text-red-500/80">This will automatically reverse the impact on investor units and fund cash.</span>
+              </p>
+
+              <div className="flex gap-4">
+                <button 
+                  disabled={isDeleting}
+                  onClick={() => setTransactionToDelete(null)}
+                  className="flex-1 py-3 px-4 bg-slate-800 hover:bg-slate-700 text-white font-semibold rounded-xl transition-all disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button 
+                  disabled={isDeleting}
+                  onClick={handleDeleteConfirm}
+                  className="flex-1 py-3 px-4 bg-red-600 hover:bg-red-500 text-white font-semibold rounded-xl transition-all shadow-lg shadow-red-600/20 disabled:opacity-50 flex items-center justify-center gap-2"
+                >
+                  {isDeleting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+                  {isDeleting ? 'Deleting...' : 'Confirm Delete'}
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
