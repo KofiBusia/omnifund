@@ -399,7 +399,7 @@ export default function BulkTransactionModal({ isOpen, onClose, investors, accou
                   className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 transition-all text-sm"
                 >
                   {accounts.map(a => (
-                    <option key={a.id} value={a.id}>{a.name} ({a.ticker})</option>
+                    <option key={a.id} value={a.id}>{a.name} ({a.ticker}){a.isHidden ? ' [Hidden]' : ''}</option>
                   ))}
                 </select>
               </div>

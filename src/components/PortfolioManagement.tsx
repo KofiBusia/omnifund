@@ -473,7 +473,9 @@ export default function PortfolioManagement({ portfolio, fund, accounts, role }:
               >
                 <option value="" className="bg-slate-900">All Accounts</option>
                 {accounts.map(acc => (
-                  <option key={acc.id} value={acc.id} className="bg-slate-900">{acc.name}</option>
+                  <option key={acc.id} value={acc.id} className="bg-slate-900">
+                    {acc.name} {acc.isHidden ? '(Hidden)' : ''}
+                  </option>
                 ))}
               </select>
             </div>

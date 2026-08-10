@@ -61,7 +61,8 @@ export default function AccountWorkspaceModal({
     aum: account.aum,
     nav: account.nav,
     totalUnits: account.totalUnits,
-    cashBalance: account.cashBalance
+    cashBalance: account.cashBalance,
+    isHidden: account.isHidden || false
   });
 
   // Strict account isolation: filter entities belonging exclusively to this account
@@ -653,6 +654,19 @@ export default function AccountWorkspaceModal({
                     className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-sm text-white focus:ring-2 focus:ring-emerald-500 outline-none font-mono"
                   />
                 </div>
+              </div>
+
+              <div className="flex items-center gap-3 pt-2">
+                <input 
+                  type="checkbox"
+                  id="workspaceIsHiddenCheck"
+                  checked={editForm.isHidden}
+                  onChange={(e) => setEditForm({ ...editForm, isHidden: e.target.checked })}
+                  className="w-4 h-4 rounded border-slate-700 text-emerald-500 focus:ring-emerald-500 bg-slate-900 cursor-pointer"
+                />
+                <label htmlFor="workspaceIsHiddenCheck" className="text-xs font-semibold text-slate-300 cursor-pointer flex items-center gap-2">
+                  <span>Hide this investment account from general lists and dropdown selectors</span>
+                </label>
               </div>
 
               <div className="pt-4 flex justify-end">

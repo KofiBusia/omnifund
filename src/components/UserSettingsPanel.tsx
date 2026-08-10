@@ -28,7 +28,7 @@ import { toast } from 'sonner';
 
 interface UserSettingsPanelProps {
   user: User | null;
-  role: 'admin' | 'investor' | null;
+  role: string | null;
   theme: 'dark' | 'light';
   onThemeChange: (newTheme: 'dark' | 'light') => void;
   isDemoMode?: boolean;

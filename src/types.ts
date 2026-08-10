@@ -9,6 +9,9 @@ export interface InvestmentAccount {
   totalUnits: number;
   capacity?: number; // Max total units allowed
   cashBalance: number;
+  manualNavAdjustment?: number;
+  isManualNav?: boolean;
+  isHidden?: boolean;
   lastValuationDate: string;
   createdAt: string;
 }
@@ -74,9 +77,56 @@ export interface AssetValuation {
   notes?: string;
 }
 
+export type UserRoleType = 'superadmin' | 'admin' | 'staff' | 'support' | 'investor';
+
 export interface UserRole {
   uid: string;
-  role: 'admin' | 'investor';
+  role: UserRoleType;
+  email?: string;
+  displayName?: string;
+}
+
+export interface UserProfile {
+  uid: string;
+  email: string;
+  displayName?: string;
+  role: UserRoleType;
+  department?: string;
+  isActive?: boolean;
+  isDemo?: boolean;
+  createdAt?: string | any;
+  updatedAt?: string | any;
+  createdBy?: string;
+  phone?: string;
+  theme?: 'dark' | 'light';
+}
+
+export interface SupportMessage {
+  id: string;
+  senderUid: string;
+  senderName: string;
+  senderRole: UserRoleType;
+  message: string;
+  timestamp: string;
+  isInternalNote?: boolean;
+}
+
+export interface SupportTicket {
+  id: string;
+  ticketNumber: string; // e.g. TCK-8492
+  subject: string;
+  category: 'Statement Inquiry' | 'Investment Request' | 'Withdrawal/Redemption' | 'KYC & Account' | 'Technical Support' | 'General Inquiry';
+  priority: 'low' | 'medium' | 'high' | 'urgent';
+  status: 'open' | 'in_progress' | 'resolved' | 'closed';
+  investorUid: string;
+  investorName: string;
+  investorEmail: string;
+  accountId?: string;
+  assignedToUid?: string;
+  assignedToName?: string;
+  createdAt: string;
+  updatedAt: string;
+  messages: SupportMessage[];
 }
 
 export interface Valuation {

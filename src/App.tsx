@@ -24,7 +24,9 @@ import {
   Moon,
   ChevronLeft,
   PanelLeftClose,
-  PanelLeftOpen
+  PanelLeftOpen,
+  ShieldCheck,
+  Headphones
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
@@ -71,10 +73,13 @@ import IngestionEngineUI from './components/IngestionEngineUI';
 import GlobalSearch from './components/GlobalSearch';
 import LoginPage from './components/LoginPage';
 import UserSettingsPanel from './components/UserSettingsPanel';
+import StaffManagement from './components/StaffManagement';
+import SupportCenter from './components/SupportCenter';
+import { UserRoleType } from './types';
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
-  const [role, setRole] = useState<'admin' | 'investor' | null>(null);
+  const [role, setRole] = useState<UserRoleType | null>(null);
   const [isDemoMode, setIsDemoMode] = useState<boolean>(false);
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
   const [loading, setLoading] = useState(true);
@@ -203,13 +208,13 @@ export default function App() {
           const userDoc = await getDoc(doc(db, 'users', user.uid));
           if (userDoc.exists()) {
             const data = userDoc.data();
-            setRole(data.role || 'admin');
+            setRole((data.role as UserRoleType) || 'admin');
             setIsDemoMode(!!data.isDemo || isDemoUser);
             if (data.theme === 'light' || data.theme === 'dark') {
               setTheme(data.theme);
             }
           } else {
-            const newRole = user.email === 'emmanuelagbanyo8@gmail.com' ? 'admin' : 'investor';
+            const newRole: UserRoleType = user.email === 'emmanuelagbanyo8@gmail.com' ? 'superadmin' : 'investor';
             setRole(newRole);
             setIsDemoMode(isDemoUser);
             await setDoc(doc(db, 'users', user.uid), { role: newRole, email: user.email, isDemo: isDemoUser, theme: 'dark' });
@@ -315,15 +320,17 @@ export default function App() {
   }
 
   const navItems = [
-    { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, roles: ['admin', 'investor'] },
-    { id: 'accounts', label: 'Accounts', icon: PieChart, roles: ['admin'] },
-    { id: 'investors', label: 'Investors', icon: Users, roles: ['admin'] },
-    { id: 'portfolio', label: 'Portfolio', icon: Briefcase, roles: ['admin', 'investor'] },
-    { id: 'analytics', label: 'Analytics', icon: Activity, roles: ['admin', 'investor'] },
-    { id: 'ingestion', label: 'Ingestion', icon: Cpu, roles: ['admin'] },
-    { id: 'valuation', label: 'Valuation', icon: TrendingUp, roles: ['admin'] },
-    { id: 'statements', label: 'Statements', icon: FileText, roles: ['admin', 'investor'] },
-    { id: 'settings', label: 'Settings', icon: Settings, roles: ['admin', 'investor'] },
+    { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, roles: ['superadmin', 'admin', 'staff', 'support', 'investor'] },
+    { id: 'accounts', label: 'Accounts', icon: PieChart, roles: ['superadmin', 'admin', 'staff'] },
+    { id: 'investors', label: 'Investors', icon: Users, roles: ['superadmin', 'admin', 'staff', 'support'] },
+    { id: 'portfolio', label: 'Portfolio', icon: Briefcase, roles: ['superadmin', 'admin', 'staff', 'investor'] },
+    { id: 'analytics', label: 'Analytics', icon: Activity, roles: ['superadmin', 'admin', 'staff', 'investor'] },
+    { id: 'ingestion', label: 'Ingestion', icon: Cpu, roles: ['superadmin', 'admin', 'staff'] },
+    { id: 'valuation', label: 'Valuation', icon: TrendingUp, roles: ['superadmin', 'admin', 'staff'] },
+    { id: 'statements', label: 'Statements', icon: FileText, roles: ['superadmin', 'admin', 'staff', 'support', 'investor'] },
+    { id: 'staff', label: 'Staff Logins', icon: ShieldCheck, roles: ['superadmin', 'admin'] },
+    { id: 'support', label: 'Support Center', icon: Headphones, roles: ['superadmin', 'admin', 'staff', 'support', 'investor'] },
+    { id: 'settings', label: 'Settings', icon: Settings, roles: ['superadmin', 'admin', 'staff', 'support', 'investor'] },
   ];
 
   const filteredNavItems = navItems.filter(item => item.roles.includes(role || ''));
@@ -496,9 +503,13 @@ export default function App() {
                   isDark ? "bg-slate-900 border-slate-800 text-white" : "bg-slate-50 border-slate-200 text-slate-900"
                 )}
               >
-                {accounts.map(acc => (
-                  <option key={acc.id} value={acc.id}>{acc.name}</option>
-                ))}
+                {accounts
+                  .filter(acc => !acc.isHidden || acc.id === selectedAccountId || accounts.every(a => a.isHidden))
+                  .map(acc => (
+                    <option key={acc.id} value={acc.id}>
+                      {acc.name} {acc.isHidden ? '(Hidden)' : ''}
+                    </option>
+                  ))}
               </select>
             )}
           </div>
@@ -609,6 +620,21 @@ export default function App() {
                   transactions={transactions} 
                   valuations={valuations} 
                   portfolio={portfolio}
+                />
+              )}
+              {activeTab === 'staff' && (
+                <StaffManagement
+                  currentUser={user}
+                  role={role}
+                  isDemoMode={isDemoMode}
+                />
+              )}
+              {activeTab === 'support' && (
+                <SupportCenter
+                  currentUser={user}
+                  role={role}
+                  accounts={accounts}
+                  isDemoMode={isDemoMode}
                 />
               )}
               {activeTab === 'settings' && (

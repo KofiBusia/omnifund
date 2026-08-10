@@ -10,7 +10,15 @@ service cloud.firestore {
       return isSignedIn() && (
         request.auth.token.email == 'emmanuelagbanyo8@gmail.com' ||
         (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
-         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin')
+         (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['admin', 'superadmin']))
+      );
+    }
+
+    function isStaff() {
+      return isSignedIn() && (
+        isAdmin() ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+         (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['admin', 'superadmin', 'staff', 'support']))
       );
     }
 
@@ -23,60 +31,73 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
-    // Account Rules: Only Admins can modify account data. Everyone authenticated can read.
+    // Account Rules
     match /accounts/{accountId} {
       allow read: if isSignedIn();
-      allow write: if isAdmin();
+      allow write: if isStaff();
     }
 
-    // Investor Rules: Admins can manage all. Investors can read their own.
+    // Investor Rules
     match /investors/{investorId} {
-      allow read: if isSignedIn() && (isAdmin() || (resource != null && resource.data.uid == request.auth.uid));
+      allow read: if isSignedIn() && (isStaff() || (resource != null && resource.data.uid == request.auth.uid));
       allow create: if isSignedIn();
-      allow update: if isSignedIn() && (isAdmin() || (resource != null && resource.data.uid == request.auth.uid));
+      allow update: if isSignedIn() && (isStaff() || (resource != null && resource.data.uid == request.auth.uid));
       allow delete: if isAdmin();
     }
 
-    // Transaction Rules: Admins can manage all. Investors can read their own.
+    // Transaction Rules
     match /transactions/{transactionId} {
-      allow read: if isSignedIn() && (isAdmin() || 
+      allow read: if isSignedIn() && (isStaff() || 
         (resource != null && get(/databases/$(database)/documents/investors/$(resource.data.investorId)).data.uid == request.auth.uid));
       allow create: if isSignedIn();
-      allow update, delete: if isAdmin();
+      allow update, delete: if isStaff();
     }
 
-    // Portfolio Rules: Only Admins can modify.
+    // Portfolio Rules
     match /portfolio/{assetId} {
       allow read: if isSignedIn();
-      allow write: if isAdmin();
+      allow write: if isStaff();
     }
 
     // Valuation Rules
     match /valuations/{valuationId} {
       allow read: if isSignedIn();
-      allow write: if isAdmin();
+      allow write: if isStaff();
     }
 
     match /reverted_valuations/{valId} {
       allow read: if isSignedIn();
-      allow write: if isAdmin();
+      allow write: if isStaff();
     }
 
     match /asset_valuations/{valId} {
       allow read: if isSignedIn();
-      allow write: if isAdmin();
+      allow write: if isStaff();
     }
 
     match /reverted_asset_valuations/{valId} {
       allow read: if isSignedIn();
-      allow write: if isAdmin();
+      allow write: if isStaff();
     }
 
-    // User Roles & Profile Settings
+    // Support Tickets
+    match /support_tickets/{ticketId} {
+      allow read: if isSignedIn() && (isStaff() || (resource != null && (resource.data.investorUid == request.auth.uid || resource.data.createdBy == request.auth.uid)));
+      allow create: if isSignedIn();
+      allow update: if isSignedIn() && (isStaff() || (resource != null && (resource.data.investorUid == request.auth.uid || resource.data.createdBy == request.auth.uid)));
+      allow delete: if isAdmin();
+    }
+
+    // User Roles & Profile Settings: Only Superadmin or the user themselves can update, only Superadmin can delete
     match /users/{userId} {
-      allow read: if isSignedIn() && (isOwner(userId) || isAdmin());
-      allow create: if isSignedIn() && (isOwner(userId) || isAdmin());
+      allow read: if isSignedIn() && (isOwner(userId) || isStaff());
+      allow create: if isSignedIn();
       allow update: if isSignedIn() && (isOwner(userId) || isAdmin());
+      allow delete: if isSignedIn() && (
+        request.auth.token.email == 'emmanuelagbanyo8@gmail.com' ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'superadmin')
+      );
     }
   }
 }

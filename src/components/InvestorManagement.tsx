@@ -1045,7 +1045,7 @@ export default function InvestorManagement({
                 const count = investors.filter(i => i.accountId === acc.id).length;
                 return (
                   <option key={acc.id} value={acc.id}>
-                    {acc.name} ({acc.ticker}) — {count} investor{count === 1 ? '' : 's'}
+                    {acc.name} ({acc.ticker}){acc.isHidden ? ' [Hidden]' : ''} — {count} investor{count === 1 ? '' : 's'}
                   </option>
                 );
               })}
@@ -1510,7 +1510,7 @@ export default function InvestorManagement({
                     className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
                   >
                     {accounts.map(acc => (
-                      <option key={acc.id} value={acc.id}>{acc.name} ({acc.ticker})</option>
+                      <option key={acc.id} value={acc.id}>{acc.name} ({acc.ticker}){acc.isHidden ? ' [Hidden]' : ''}</option>
                     ))}
                   </select>
                 </div>
@@ -1678,7 +1678,7 @@ export default function InvestorManagement({
                     className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
                   >
                     {accounts.map(acc => (
-                      <option key={acc.id} value={acc.id}>{acc.name} ({acc.ticker})</option>
+                      <option key={acc.id} value={acc.id}>{acc.name} ({acc.ticker}){acc.isHidden ? ' [Hidden]' : ''}</option>
                     ))}
                   </select>
                 </div>

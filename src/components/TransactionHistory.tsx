@@ -289,7 +289,9 @@ export default function TransactionHistory({
                   >
                     <option value="ALL">All Accounts</option>
                     {accounts.map(acc => (
-                      <option key={acc.id} value={acc.id}>{acc.name}</option>
+                      <option key={acc.id} value={acc.id}>
+                        {acc.name} {acc.isHidden ? '(Hidden)' : ''}
+                      </option>
                     ))}
                   </select>
                 </div>

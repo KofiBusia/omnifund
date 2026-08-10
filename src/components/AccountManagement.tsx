@@ -27,7 +27,9 @@ import {
   Brain,
   Calendar,
   Copy,
-  MessageSquare
+  MessageSquare,
+  Eye,
+  EyeOff
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { addDoc, collection, doc, updateDoc, deleteDoc, getDocs, query, where, writeBatch, serverTimestamp, increment, runTransaction } from 'firebase/firestore';
@@ -75,6 +77,23 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
   const [pinError, setPinError] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
+  const [showHidden, setShowHidden] = useState(false);
+
+  const hiddenCount = useMemo(() => accounts.filter(a => a.isHidden).length, [accounts]);
+
+  const handleToggleHideAccount = async (account: InvestmentAccount, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    try {
+      const accountRef = doc(db, 'accounts', account.id);
+      const newHiddenState = !account.isHidden;
+      await updateDoc(accountRef, {
+        isHidden: newHiddenState
+      });
+      toast.success(newHiddenState ? `"${account.name}" hidden from account list` : `"${account.name}" is now visible`);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, `accounts/${account.id}`);
+    }
+  };
   
   const [highlightedTransactionId, setHighlightedTransactionId] = useState<string | null>(null);
   const [editingTransaction, setEditingTransaction] = useState<Transaction | null>(null);
@@ -219,12 +238,13 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
   };
 
   const filteredAccounts = useMemo(() => 
-    accounts.filter(a => 
-      a.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
-      a.ticker.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      (a.description && a.description.toLowerCase().includes(searchTerm.toLowerCase()))
-    ),
-    [accounts, searchTerm]
+    accounts.filter(a => {
+      if (!showHidden && a.isHidden) return false;
+      return a.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
+        a.ticker.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        (a.description && a.description.toLowerCase().includes(searchTerm.toLowerCase()));
+    }),
+    [accounts, searchTerm, showHidden]
   );
 
   // Group investors and assets by accountId for O(1) access
@@ -353,14 +373,42 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
 
     try {
       const accountRef = doc(db, 'accounts', editingAccount.id);
+      
+      const accountAssets = portfolio.filter(p => p.accountId === editingAccount.id);
+      const portfolioValue = accountAssets.reduce((sum, a) => sum + (a.marketValue || 0), 0);
+      const totalAum = editingAccount.aum || (editingAccount.totalUnits * editingAccount.nav);
+      const manualNavAdjustment = totalAum - (portfolioValue + (editingAccount.cashBalance || 0));
+
       await updateDoc(accountRef, {
         name: editingAccount.name,
         ticker: editingAccount.ticker,
         description: editingAccount.description,
         nav: editingAccount.nav,
-        aum: editingAccount.aum,
-        totalUnits: editingAccount.totalUnits
+        aum: totalAum,
+        totalUnits: editingAccount.totalUnits,
+        manualNavAdjustment,
+        isManualNav: true,
+        isHidden: editingAccount.isHidden || false,
+        lastValuationDate: new Date().toISOString()
       });
+
+      const accountInvestors = investors.filter(i => i.accountId === editingAccount.id);
+      const invUpdates = accountInvestors.map(i => {
+        return updateDoc(doc(db, 'investors', i.id), {
+          currentValue: (i.unitsOwned || 0) * editingAccount.nav
+        });
+      });
+      await Promise.all(invUpdates);
+
+      await addDoc(collection(db, 'valuations'), {
+        accountId: editingAccount.id,
+        date: serverTimestamp(),
+        nav: editingAccount.nav,
+        aum: totalAum,
+        notes: `Manual Account Edit (NAV set to GH₵${editingAccount.nav.toFixed(4)})`
+      });
+
+      toast.success(`Account details updated. Published NAV: GH₵${editingAccount.nav.toFixed(4)}`);
       setIsEditModalOpen(false);
       setEditingAccount(null);
     } catch (error) {
@@ -682,6 +730,19 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
             className="w-full bg-transparent border-none focus:ring-0 pl-12 pr-4 py-3 text-slate-200 placeholder:text-slate-600"
           />
         </div>
+        <button
+          onClick={() => setShowHidden(!showHidden)}
+          className={cn(
+            "px-4 py-2.5 rounded-xl border text-xs font-semibold flex items-center gap-2 transition-all shrink-0 cursor-pointer mr-1",
+            showHidden 
+              ? "bg-amber-500/10 border-amber-500/30 text-amber-400 hover:bg-amber-500/20" 
+              : "bg-slate-800 border-slate-700 text-slate-400 hover:text-slate-200"
+          )}
+          title={showHidden ? "Hide accounts marked as hidden" : "Show accounts marked as hidden"}
+        >
+          {showHidden ? <Eye className="w-4 h-4 text-amber-400" /> : <EyeOff className="w-4 h-4 text-slate-400" />}
+          <span>{showHidden ? "Showing Hidden" : `Show Hidden (${hiddenCount})`}</span>
+        </button>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -724,13 +785,22 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
-                    <div className="bg-emerald-500/10 text-emerald-500 text-[10px] font-bold px-3 py-1 rounded-full border border-emerald-500/20 uppercase flex items-center gap-2">
-                      <div className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" />
-                      Live
-                    </div>
-                    <div className="bg-blue-500/10 text-blue-500 text-[10px] font-bold px-3 py-1 rounded-full border border-blue-500/20 uppercase">
-                      Active
-                    </div>
+                    {account.isHidden ? (
+                      <div className="bg-amber-500/10 text-amber-400 text-[10px] font-bold px-3 py-1 rounded-full border border-amber-500/20 uppercase flex items-center gap-1.5">
+                        <EyeOff className="w-3 h-3" />
+                        Hidden
+                      </div>
+                    ) : (
+                      <>
+                        <div className="bg-emerald-500/10 text-emerald-500 text-[10px] font-bold px-3 py-1 rounded-full border border-emerald-500/20 uppercase flex items-center gap-2">
+                          <div className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" />
+                          Live
+                        </div>
+                        <div className="bg-blue-500/10 text-blue-500 text-[10px] font-bold px-3 py-1 rounded-full border border-blue-500/20 uppercase">
+                          Active
+                        </div>
+                      </>
+                    )}
                   </div>
                 </div>
 
@@ -806,6 +876,18 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
                       title="AI Behavioral Audit"
                     >
                       <Brain className="w-5 h-5" />
+                    </button>
+                    <button 
+                      onClick={(e) => handleToggleHideAccount(account, e)}
+                      className={cn(
+                        "p-2 rounded-lg transition-all",
+                        account.isHidden 
+                          ? "bg-amber-500/10 text-amber-400 hover:bg-amber-500/20" 
+                          : "hover:bg-slate-800 text-slate-500 hover:text-slate-200"
+                      )}
+                      title={account.isHidden ? "Unhide Account" : "Hide Account"}
+                    >
+                      {account.isHidden ? <Eye className="w-5 h-5 text-amber-400" /> : <EyeOff className="w-5 h-5" />}
                     </button>
                     <button 
                       onClick={() => {
@@ -952,6 +1034,20 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
                     onChange={(e) => setEditingAccount({...editingAccount, totalUnits: Number(e.target.value)})}
                     className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
                   />
+                </div>
+
+                <div className="flex items-center gap-3 pt-2">
+                  <input 
+                    type="checkbox"
+                    id="editAccountIsHidden"
+                    checked={editingAccount.isHidden || false}
+                    onChange={(e) => setEditingAccount({...editingAccount, isHidden: e.target.checked})}
+                    className="w-4 h-4 rounded border-slate-700 text-emerald-500 focus:ring-emerald-500 bg-slate-800 cursor-pointer"
+                  />
+                  <label htmlFor="editAccountIsHidden" className="text-sm font-medium text-slate-300 cursor-pointer flex items-center gap-2">
+                    <EyeOff className="w-4 h-4 text-amber-400" />
+                    <span>Hide this investment account from general lists and dropdowns</span>
+                  </label>
                 </div>
 
                 <div className="flex gap-4 pt-4">
@@ -1511,6 +1607,10 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
                 const accountRef = doc(db, 'accounts', updatedAccount.id);
                 const calculatedAum = updatedAccount.totalUnits > 0 ? updatedAccount.totalUnits * updatedAccount.nav : updatedAccount.aum;
                 
+                const accountAssets = portfolio.filter(p => p.accountId === updatedAccount.id);
+                const portfolioValue = accountAssets.reduce((sum, p) => sum + (p.marketValue || 0), 0);
+                const manualNavAdjustment = calculatedAum - (portfolioValue + (updatedAccount.cashBalance || 0));
+
                 await updateDoc(accountRef, {
                   name: updatedAccount.name,
                   ticker: updatedAccount.ticker,
@@ -1519,6 +1619,9 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
                   aum: calculatedAum,
                   totalUnits: updatedAccount.totalUnits,
                   cashBalance: updatedAccount.cashBalance,
+                  manualNavAdjustment,
+                  isManualNav: true,
+                  isHidden: updatedAccount.isHidden || false,
                   lastValuationDate: new Date().toISOString()
                 });
 

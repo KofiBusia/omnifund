@@ -212,7 +212,7 @@ export default function BatchDeleteByDateModal({
                 >
                   <option value="ALL">All Funds & Accounts</option>
                   {accounts.map(acc => (
-                    <option key={acc.id} value={acc.id}>{acc.name} ({acc.ticker})</option>
+                    <option key={acc.id} value={acc.id}>{acc.name} ({acc.ticker}){acc.isHidden ? ' [Hidden]' : ''}</option>
                   ))}
                 </select>
               </div>

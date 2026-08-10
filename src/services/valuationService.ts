@@ -402,18 +402,29 @@ export const recalculateAccountValuation = async (accountId: string) => {
     const allAssets = assetsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Asset));
 
     const totalHoldingsValue = allAssets.reduce((sum, a) => sum + (a.marketValue || 0), 0);
-    const totalMarketValue = totalHoldingsValue + (account.cashBalance || 0);
-    const calculatedNAV = account.totalUnits > 0 ? totalMarketValue / account.totalUnits : account.nav;
+    const manualAdj = account.manualNavAdjustment || 0;
+    const totalMarketValue = totalHoldingsValue + (account.cashBalance || 0) + manualAdj;
+    
+    // Check total investor units
+    const invQuery = query(collection(db, 'investors'), where('accountId', '==', accountId));
+    const invSnap = await getDocs(invQuery);
+    const actualTotalUnits = invSnap.docs.reduce((sum, d) => sum + (d.data().unitsOwned || 0), 0) || account.totalUnits || 0;
+
+    const isManual = (account as any).lastValuationMethod === 'manual' || (account as any).isManualNav === true;
+    const calculatedNAV = isManual && account.nav > 0 
+      ? account.nav 
+      : (actualTotalUnits > 0 ? totalMarketValue / actualTotalUnits : account.nav);
+
+    const calculatedAum = actualTotalUnits > 0 ? actualTotalUnits * calculatedNAV : totalMarketValue;
 
     await updateDoc(accountRef, {
-      aum: totalMarketValue,
+      aum: calculatedAum,
       nav: calculatedNAV,
+      totalUnits: actualTotalUnits,
       lastValuationDate: new Date().toISOString()
     });
 
     // Update all investors for this account
-    const invQuery = query(collection(db, 'investors'), where('accountId', '==', accountId));
-    const invSnap = await getDocs(invQuery);
     const invUpdates = invSnap.docs.map(d => {
       const invData = d.data();
       return updateDoc(doc(db, 'investors', d.id), {
@@ -427,11 +438,11 @@ export const recalculateAccountValuation = async (accountId: string) => {
       accountId: accountId,
       date: serverTimestamp(),
       nav: calculatedNAV,
-      aum: totalMarketValue,
+      aum: calculatedAum,
       notes: 'Manual Portfolio Change Recalculation'
     });
 
-    return { aum: totalMarketValue, nav: calculatedNAV };
+    return { aum: calculatedAum, nav: calculatedNAV };
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, `accounts/${accountId}/recalculate`);
     throw error;
