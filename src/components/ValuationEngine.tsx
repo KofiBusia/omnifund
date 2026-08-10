@@ -1,5 +1,14 @@
-import { useState, useMemo } from 'react';
-import { Asset, InvestmentAccount, Investor, Valuation } from '../types';
+import { useState, useMemo, useEffect } from 'react';
+import { 
+  Asset, 
+  InvestmentAccount, 
+  Investor, 
+  Valuation, 
+  ValuationRun, 
+  ValuationException, 
+  PriceStatus,
+  FeeAccrualConfig
+} from '../types';
 import ValuationIntelligence from './ValuationIntelligence';
 import { 
   Calculator, 
@@ -12,27 +21,43 @@ import {
   RefreshCw,
   X,
   Zap,
-  Plus,
-  Minus,
   RotateCcw,
   Trash2,
   Send,
-  UploadCloud
+  ShieldCheck,
+  Scale,
+  DollarSign,
+  PieChart,
+  Layers,
+  Sparkles,
+  AlertTriangle,
+  Clock,
+  ArrowUpRight,
+  ArrowDownRight,
+  Check,
+  Calendar,
+  Lock
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { toast } from 'sonner';
-import { handleFirestoreError, OperationType } from '../lib/utils';
-
 import { cn, formatCurrency } from '../lib/utils';
-
 import { 
   runGlobalValuation, 
   runManualValuation, 
   deleteLatestValuation, 
   redoLatestValuation, 
   resetAllValuations,
-  resetToMagicPerformance
+  resetToMagicPerformance,
+  resolveAssetPriceStatuses,
+  calculateDailyFeeAccruals,
+  detectValuationExceptions,
+  calculateNavBridge,
+  executeFormalValuationRun,
+  DEFAULT_FEE_CONFIG
 } from '../services/valuationService';
+import { calculateNetAssets, calculateNavPerUnit, roundMoney, roundNav } from '../services/fundAccountingEngine';
+import { collection, query, where, getDocs, orderBy } from 'firebase/firestore';
+import { db } from '../firebase';
 
 interface ValuationEngineProps {
   fund: InvestmentAccount | null;
@@ -42,13 +67,22 @@ interface ValuationEngineProps {
   revertedCount?: number;
 }
 
-export default function ValuationEngine({ fund, portfolio, investors, valuations, revertedCount = 0 }: ValuationEngineProps) {
+export default function ValuationEngine({ 
+  fund, 
+  portfolio, 
+  investors, 
+  valuations, 
+  revertedCount = 0 
+}: ValuationEngineProps) {
+  const [activeTab, setActiveTab] = useState<'workspace' | 'nav_bridge' | 'exceptions' | 'history'>('workspace');
   const [isCalculating, setIsCalculating] = useState(false);
   const [isUndoing, setIsUndoing] = useState(false);
   const [isRedoing, setIsRedoing] = useState(false);
   const [isResetting, setIsResetting] = useState(false);
   const [showUndoConfirm, setShowUndoConfirm] = useState(false);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
+
+  // Valuation Parameters
   const [valMethod, setValMethod] = useState<'automated' | 'manual'>('automated');
   const [manualGain, setManualGain] = useState<string>('');
   const [targetPricePerUnit, setTargetPricePerUnit] = useState<string>('');
@@ -58,22 +92,115 @@ export default function ValuationEngine({ fund, portfolio, investors, valuations
   const [newAssetPrice, setNewAssetPrice] = useState<string>('');
   const [lastResult, setLastResult] = useState<{ nav: number; aum: number } | null>(null);
 
-  const selectedAsset = useMemo(() => 
-    portfolio.find(a => a.id === selectedAssetId),
-    [portfolio, selectedAssetId]
+  // Fee Accruals Config
+  const [feeConfig, setFeeConfig] = useState<FeeAccrualConfig>(DEFAULT_FEE_CONFIG);
+
+  // Formal Valuation Runs State
+  const [formalRuns, setFormalRuns] = useState<ValuationRun[]>([]);
+  const [selectedRun, setSelectedRun] = useState<ValuationRun | null>(null);
+  const [isLoadingRuns, setIsLoadingRuns] = useState(false);
+
+  const activeInvestors = useMemo(() => 
+    fund ? investors.filter(i => i.accountId === fund.id) : investors,
+    [investors, fund]
   );
 
-  const sortedValuations = [...valuations].sort((a, b) => {
-    // Sync sorting with App.tsx: treat pending (null date) as newest
-    const timeA = a.date?.seconds || (Date.now() / 1000) + 1000;
-    const timeB = b.date?.seconds || (Date.now() / 1000) + 1000;
-    return timeB - timeA;
-  });
+  const activePortfolio = useMemo(() => 
+    fund ? portfolio.filter(p => p.accountId === fund.id) : portfolio,
+    [portfolio, fund]
+  );
 
-  const totalMarketValue = portfolio.reduce((sum, asset) => sum + asset.marketValue, 0);
-  const totalUnits = investors.reduce((sum, inv) => sum + inv.unitsOwned, 0);
-  
+  // Asset Price Statuses & Stale Price Detection
+  const assetStatuses = useMemo(() => 
+    resolveAssetPriceStatuses(activePortfolio, 7, manualDate),
+    [activePortfolio, manualDate]
+  );
+
+  const totalMarketValue = useMemo(() => 
+    activePortfolio.reduce((sum, a) => sum + (a.marketValue || 0), 0),
+    [activePortfolio]
+  );
+
+  const totalUnits = useMemo(() => 
+    activeInvestors.reduce((sum, inv) => sum + (inv.unitsOwned || 0), 0),
+    [activeInvestors]
+  );
+
   const gainValue = parseFloat(manualGain) || 0;
+
+  // Real-time Calculated Net Assets & Fee Accruals
+  const feeAccruals = useMemo(() => {
+    const grossAssets = totalMarketValue + (fund?.cashBalance || 0) + (fund?.receivables || 0);
+    return calculateDailyFeeAccruals(grossAssets, feeConfig);
+  }, [totalMarketValue, fund, feeConfig]);
+
+  const { totalAssets, totalLiabilities, netAssets } = useMemo(() => {
+    const currentAccrued = (fund?.accruedFees || 0) + feeAccruals.totalDailyAccrual;
+    return calculateNetAssets(
+      totalMarketValue + (valMethod === 'manual' ? gainValue : 0),
+      fund?.cashBalance || 0,
+      fund?.receivables || 0,
+      fund?.liabilities || 0,
+      currentAccrued
+    );
+  }, [totalMarketValue, valMethod, gainValue, fund, feeAccruals]);
+
+  const targetNavNumber = parseFloat(targetPricePerUnit);
+  const calculatedNAV = useMemo(() => {
+    if (targetNavNumber > 0) return targetNavNumber;
+    return calculateNavPerUnit(netAssets, totalUnits, fund?.nav || 1.0000);
+  }, [targetNavNumber, netAssets, totalUnits, fund?.nav]);
+
+  const projectedAUM = useMemo(() => {
+    if (targetNavNumber > 0 && totalUnits > 0) return roundMoney(totalUnits * targetNavNumber);
+    return netAssets;
+  }, [targetNavNumber, totalUnits, netAssets]);
+
+  // Detected Valuation Exceptions
+  const exceptions = useMemo(() => {
+    if (!fund) return [];
+    return detectValuationExceptions(fund, activePortfolio, activeInvestors, fund.nav || 1.0000, calculatedNAV);
+  }, [fund, activePortfolio, activeInvestors, calculatedNAV]);
+
+  // NAV Bridge Calculation
+  const navBridge = useMemo(() => {
+    const portfolioGain = totalMarketValue - activePortfolio.reduce((sum, a) => sum + (a.totalCostBasis || 0), 0);
+    return calculateNavBridge(
+      fund?.nav || 1.0000,
+      calculatedNAV,
+      portfolioGain,
+      0,
+      feeAccruals.totalDailyAccrual,
+      0,
+      totalUnits
+    );
+  }, [fund?.nav, calculatedNAV, totalMarketValue, activePortfolio, feeAccruals, totalUnits]);
+
+  // Fetch Valuation Runs from Firestore
+  const fetchValuationRuns = async () => {
+    if (!fund) return;
+    setIsLoadingRuns(true);
+    try {
+      const q = query(
+        collection(db, 'valuation_runs'),
+        where('accountId', '==', fund.id)
+      );
+      const snap = await getDocs(q);
+      const runs = snap.docs.map(d => ({ ...d.data(), id: d.id } as ValuationRun));
+      runs.sort((a, b) => new Date(b.runTimestamp).getTime() - new Date(a.runTimestamp).getTime());
+      setFormalRuns(runs);
+    } catch (err) {
+      console.error('Failed to fetch valuation runs:', err);
+    } finally {
+      setIsLoadingRuns(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === 'history') {
+      fetchValuationRuns();
+    }
+  }, [activeTab, fund?.id]);
 
   const handleTargetNavChange = (targetNavStr: string) => {
     setTargetPricePerUnit(targetNavStr);
@@ -90,8 +217,7 @@ export default function ValuationEngine({ fund, portfolio, investors, valuations
       setGainLossPct(((requiredGain / totalMarketValue) * 100).toFixed(2));
     }
   };
-  
-  // Calculate gain based on percentage if provided
+
   const handlePctChange = (pct: string) => {
     setGainLossPct(pct);
     setTargetPricePerUnit('');
@@ -117,6 +243,7 @@ export default function ValuationEngine({ fund, portfolio, investors, valuations
   const handlePriceChange = (price: string) => {
     setNewAssetPrice(price);
     setTargetPricePerUnit('');
+    const selectedAsset = activePortfolio.find(a => a.id === selectedAssetId);
     if (!price || !selectedAsset) {
       setManualGain('');
       setGainLossPct('');
@@ -129,38 +256,33 @@ export default function ValuationEngine({ fund, portfolio, investors, valuations
     setGainLossPct(pct.toFixed(2));
   };
 
-  const targetNavNumber = parseFloat(targetPricePerUnit);
-  const calculatedNAV = targetNavNumber > 0 
-    ? targetNavNumber 
-    : (totalUnits > 0 ? (totalMarketValue + (fund?.cashBalance || 0) + (valMethod === 'manual' ? gainValue : 0)) / totalUnits : (fund?.nav || 1.0000));
-  
-  const projectAum = totalUnits > 0 
-    ? totalUnits * calculatedNAV 
-    : (totalMarketValue + (fund?.cashBalance || 0) + (valMethod === 'manual' ? gainValue : 0));
-  
   const runValuation = async () => {
     if (!fund) {
       toast.error("Please select an active fund/account first.");
       return;
     }
+
+    if (exceptions.some(e => e.severity === 'CRITICAL')) {
+      toast.warning("Critical valuation exceptions detected. Review exceptions before final publication.");
+    }
+
     setIsCalculating(true);
     setLastResult(null);
-    
+
     try {
       if (valMethod === 'automated' && !targetPricePerUnit) {
         await runGlobalValuation();
-        // Also run for specific fund to guarantee complete update and return result
-        const result = await runManualValuation(fund.id, 0, 'Automated Real-time Market Valuation');
+        const result = await runManualValuation(fund.id, 0, 'Automated Market Valuation');
         if (result) {
           setLastResult(result);
-          toast.success(`Valuation published for "${fund.name}"! Price per unit: GH₵${result.nav.toFixed(4)}`);
+          toast.success(`Valuation published for "${fund.name}"! New NAV: GH₵${result.nav.toFixed(4)}`);
         }
       } else {
         const notes = targetPricePerUnit 
-          ? `Direct Published Price per Unit (NAV): GH₵${targetPricePerUnit}`
+          ? `Published Target Price per Unit (NAV): GH₵${targetPricePerUnit}`
           : selectedAssetId !== 'all' 
-            ? `Manual valuation for ${selectedAsset?.ticker}. New Price: ${newAssetPrice || 'N/A'}. Gain/Loss: ${gainLossPct}%`
-            : `Manual valuation adjustment. Gain/Loss: ${gainLossPct}%`;
+            ? `Manual price adjustment for asset ${selectedAssetId}`
+            : `Manual performance adjustment: ${gainLossPct}%`;
           
         const assetUpdate = selectedAssetId !== 'all' && newAssetPrice 
           ? { id: selectedAssetId, newPrice: parseFloat(newAssetPrice) }
@@ -174,9 +296,13 @@ export default function ValuationEngine({ fund, portfolio, investors, valuations
           assetUpdate,
           targetPricePerUnit ? parseFloat(targetPricePerUnit) : undefined
         );
+
+        // Also record formal ValuationRun snapshot
+        await executeFormalValuationRun(fund.id, manualDate, 'System Admin', feeConfig, gainValue, notes);
+
         if (result) {
           setLastResult(result);
-          toast.success(`Valuation published for "${fund.name}"! Price per unit: GH₵${result.nav.toFixed(4)}`);
+          toast.success(`Valuation Run Published for "${fund.name}"! NAV: GH₵${result.nav.toFixed(4)}`);
           setManualGain('');
           setTargetPricePerUnit('');
           setGainLossPct('');
@@ -186,66 +312,41 @@ export default function ValuationEngine({ fund, portfolio, investors, valuations
       }
     } catch (error: any) {
       console.error(error);
-      toast.error('Error publishing valuation: ' + (error?.message || 'Please check logs'));
+      toast.error('Error publishing valuation: ' + (error?.message || 'Check logs'));
     } finally {
       setTimeout(() => setIsCalculating(false), 1000);
     }
   };
 
   const handleUndo = async () => {
-    if (!fund || sortedValuations.length === 0 || isCalculating || isUndoing || isRedoing) {
-      console.warn('Undo skipped: precondition not met', { fund: !!fund, len: sortedValuations.length, isCalculating, isUndoing, isRedoing });
-      return;
-    }
-    
-    const latest = sortedValuations[0];
-    const previous = sortedValuations[1];
-    
-    console.info('Attempting Undo for latest record:', latest);
-
-    if (!latest.id) {
-      console.error('Latest valuation missing document ID');
-      alert('Cannot undo: Valuation record is not fully synced yet. Please wait 2 seconds and try again.');
-      return;
-    }
+    if (!fund || valuations.length === 0 || isCalculating || isUndoing || isRedoing) return;
+    const latest = valuations[0];
+    const previous = valuations[1];
 
     setShowUndoConfirm(false);
     setIsUndoing(true);
     try {
       await deleteLatestValuation(fund.id, latest.id, previous);
-      setLastResult(null); 
-      console.info('Undo operation triggered successfully');
+      setLastResult(null);
+      toast.success("Valuation run undone successfully");
     } catch (error: any) {
-      console.error('Undo Failed Component Level:', error);
-      const errorMessage = error?.message?.includes('{') 
-        ? JSON.parse(error.message).error 
-        : error?.message || 'Unknown error';
-      alert(`Failed to undo: ${errorMessage}`);
+      toast.error(`Undo failed: ${error.message}`);
     } finally {
       setIsUndoing(false);
     }
   };
 
   const handleRedo = async () => {
-    if (!fund || revertedCount === 0 || isCalculating || isUndoing || isRedoing) {
-      console.warn('Redo skipped: precondition not met');
-      return;
-    }
-    
-    console.info('Attempting Redo for account:', fund.id);
+    if (!fund || revertedCount === 0 || isCalculating || isUndoing || isRedoing) return;
     setIsRedoing(true);
     try {
       const result = await redoLatestValuation(fund.id);
       if (result) {
         setLastResult(result);
-        console.info('Redo operation triggered successfully');
+        toast.success(`Valuation redone! NAV: GH₵${result.nav.toFixed(4)}`);
       }
     } catch (error: any) {
-      console.error('Redo Failed Component Level:', error);
-      const errorMessage = error?.message?.includes('{') 
-        ? JSON.parse(error.message).error 
-        : error?.message || 'Unknown error';
-      alert(`Failed to redo: ${errorMessage}`);
+      toast.error(`Redo failed: ${error.message}`);
     } finally {
       setIsRedoing(false);
     }
@@ -253,37 +354,15 @@ export default function ValuationEngine({ fund, portfolio, investors, valuations
 
   const handleReset = async () => {
     if (!fund || isResetting) return;
-    console.info('Attempting Reset for account:', fund.id);
-    
     setShowResetConfirm(false);
     setIsResetting(true);
     try {
       await resetAllValuations(fund.id);
       setLastResult(null);
       setManualGain('');
-      console.info('Reset operation completed');
+      toast.success("Fund valuation history reset to 1.0000 baseline");
     } catch (error: any) {
-      console.error('Reset Failed Component Level:', error);
-      alert('Reset failed. Check permissions in console.');
-    } finally {
-      setIsResetting(false);
-    }
-  };
-
-  const handleMagicReset = async () => {
-    if (!fund || isResetting) return;
-    console.info('Attempting Magic Reset for account:', fund.id);
-    
-    setShowResetConfirm(false);
-    setIsResetting(true);
-    try {
-      await resetToMagicPerformance(fund.id);
-      setLastResult(null);
-      setManualGain('');
-      console.info('Magic Reset operation completed');
-    } catch (error: any) {
-      console.error('Magic Reset Failed Component Level:', error);
-      alert('Magic Reset failed. Check permissions in console.');
+      toast.error("Reset failed. Check permissions.");
     } finally {
       setIsResetting(false);
     }
@@ -291,442 +370,494 @@ export default function ValuationEngine({ fund, portfolio, investors, valuations
 
   return (
     <div className="space-y-8">
-      <div className="flex items-center justify-between">
-        <div>
-          <div className="flex items-center gap-2 mb-1">
-            <h2 className="text-3xl font-bold text-white">Valuation Engine</h2>
-            <div className="flex items-center gap-1.5 bg-emerald-500/10 text-emerald-500 px-2 py-0.5 rounded-full border border-emerald-500/20">
-              <div className="w-1 h-1 bg-emerald-500 rounded-full animate-pulse" />
-              <span className="text-[10px] font-bold uppercase tracking-wider">Live</span>
+      {/* Institutional Top KPI Header */}
+      <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 shadow-2xl">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6 pb-6 border-b border-slate-800">
+          <div>
+            <div className="flex items-center gap-3 mb-1">
+              <h2 className="text-3xl font-black text-white">{fund?.name || 'Global Fund'}</h2>
+              <span className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-3 py-1 rounded-full text-xs font-bold font-mono">
+                {fund?.ticker || 'FND'}
+              </span>
             </div>
+            <p className="text-xs text-slate-400">Authoritative Fund Valuation Engine & NAV Center</p>
           </div>
-          <p className="text-slate-400 mt-1">Calculate and publish Net Asset Value (NAV)</p>
-        </div>
-        
-        <div className="flex items-center gap-4 bg-slate-900 border border-slate-800 p-2 rounded-2xl">
-          <button 
-            onClick={() => setValMethod('automated')}
-            className={cn(
-              "px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2",
-              valMethod === 'automated' ? "bg-emerald-600 text-white shadow-lg" : "text-slate-400 hover:text-white"
-            )}
-          >
-            <TrendingUp className="w-3.5 h-3.5" /> Automated
-          </button>
-          <button 
-            onClick={() => setValMethod('manual')}
-            className={cn(
-              "px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2",
-              valMethod === 'manual' ? "bg-blue-600 text-white shadow-lg" : "text-slate-400 hover:text-white"
-            )}
-          >
-            <Zap className="w-3.5 h-3.5" /> Manual Adjustment
-          </button>
+
+          {/* Action Buttons */}
+          <div className="flex items-center gap-3">
+            <button 
+              onClick={() => setValMethod('automated')}
+              className={cn(
+                "px-4 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center gap-2",
+                valMethod === 'automated' ? "bg-emerald-600 text-white shadow-lg" : "bg-slate-800 text-slate-400 hover:text-white"
+              )}
+            >
+              <TrendingUp className="w-4 h-4" /> Automated GSE Market Run
+            </button>
+            <button 
+              onClick={() => setValMethod('manual')}
+              className={cn(
+                "px-4 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center gap-2",
+                valMethod === 'manual' ? "bg-blue-600 text-white shadow-lg" : "bg-slate-800 text-slate-400 hover:text-white"
+              )}
+            >
+              <Zap className="w-4 h-4" /> Manual Adjustment Run
+            </button>
+
+            <button 
+              onClick={runValuation}
+              disabled={isCalculating || !fund}
+              className="px-8 py-3.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold rounded-2xl transition-all shadow-xl shadow-emerald-600/30 flex items-center gap-3 text-sm"
+            >
+              {isCalculating ? <RefreshCw className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
+              {isCalculating ? 'Publishing Valuation...' : 'Publish Valuation'}
+            </button>
+          </div>
         </div>
 
+        {/* Core Financial Metrics Grid */}
+        <div className="grid grid-cols-2 lg:grid-cols-6 gap-4 pt-6 text-xs">
+          <div className="space-y-1">
+            <span className="text-slate-500 uppercase font-bold text-[10px] tracking-wider">NAV Per Unit</span>
+            <p className="text-2xl font-black text-emerald-400 font-mono">
+              GH₵{calculatedNAV.toFixed(4)}
+            </p>
+          </div>
+          <div className="space-y-1">
+            <span className="text-slate-500 uppercase font-bold text-[10px] tracking-wider">Net Assets (NAV)</span>
+            <p className="text-xl font-bold text-white">
+              {formatCurrency(netAssets)}
+            </p>
+          </div>
+          <div className="space-y-1">
+            <span className="text-slate-500 uppercase font-bold text-[10px] tracking-wider">Total Assets</span>
+            <p className="text-xl font-bold text-slate-200">
+              {formatCurrency(totalAssets)}
+            </p>
+          </div>
+          <div className="space-y-1">
+            <span className="text-slate-500 uppercase font-bold text-[10px] tracking-wider">Total Liabilities</span>
+            <p className="text-xl font-bold text-red-400">
+              {formatCurrency(totalLiabilities)}
+            </p>
+          </div>
+          <div className="space-y-1">
+            <span className="text-slate-500 uppercase font-bold text-[10px] tracking-wider">Units Outstanding</span>
+            <p className="text-xl font-bold text-slate-200 font-mono">
+              {totalUnits.toLocaleString()}
+            </p>
+          </div>
+          <div className="space-y-1">
+            <span className="text-slate-500 uppercase font-bold text-[10px] tracking-wider">Exceptions Status</span>
+            <div>
+              {exceptions.some(e => e.severity === 'CRITICAL') ? (
+                <span className="bg-red-500/10 text-red-400 border border-red-500/20 px-2.5 py-1 rounded-full font-bold text-[10px]">
+                  ⚠️ {exceptions.length} Critical Exceptions
+                </span>
+              ) : exceptions.length > 0 ? (
+                <span className="bg-amber-500/10 text-amber-400 border border-amber-500/20 px-2.5 py-1 rounded-full font-bold text-[10px]">
+                  ⚡ {exceptions.length} Warnings
+                </span>
+              ) : (
+                <span className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2.5 py-1 rounded-full font-bold text-[10px]">
+                  ✅ Clean & Verified
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Sub-Navigation Bar */}
+      <div className="flex items-center gap-2 border-b border-slate-800 pb-4 overflow-x-auto">
         <button 
-          onClick={runValuation}
-          disabled={isCalculating || !fund}
+          onClick={() => setActiveTab('workspace')}
           className={cn(
-            "px-8 py-4 rounded-xl font-bold flex items-center gap-3 transition-all shadow-xl whitespace-nowrap text-sm",
-            isCalculating 
-              ? "bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-700" 
-              : "bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-600/30 active:scale-[0.98]"
+            "px-4 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center gap-2 whitespace-nowrap",
+            activeTab === 'workspace' ? "bg-emerald-600 text-white shadow-lg" : "bg-slate-900 border border-slate-800 text-slate-400 hover:text-white"
           )}
         >
-          {isCalculating ? (
-            <RefreshCw className="w-5 h-5 animate-spin" />
-          ) : (
-            <Send className="w-5 h-5" />
+          <Calculator className="w-4 h-4" /> Valuation Workspace
+        </button>
+        <button 
+          onClick={() => setActiveTab('nav_bridge')}
+          className={cn(
+            "px-4 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center gap-2 whitespace-nowrap",
+            activeTab === 'nav_bridge' ? "bg-emerald-600 text-white shadow-lg" : "bg-slate-900 border border-slate-800 text-slate-400 hover:text-white"
           )}
-          {isCalculating ? 'Publishing Valuation...' : 'Publish Valuation'}
+        >
+          <Layers className="w-4 h-4" /> NAV Movement Bridge
+        </button>
+        <button 
+          onClick={() => setActiveTab('exceptions')}
+          className={cn(
+            "px-4 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center gap-2 whitespace-nowrap relative",
+            activeTab === 'exceptions' ? "bg-emerald-600 text-white shadow-lg" : "bg-slate-900 border border-slate-800 text-slate-400 hover:text-white"
+          )}
+        >
+          <Scale className="w-4 h-4" /> Reconciliation & Exception Center
+          {exceptions.length > 0 && (
+            <span className="w-2 h-2 rounded-full bg-red-400 animate-pulse" />
+          )}
+        </button>
+        <button 
+          onClick={() => setActiveTab('history')}
+          className={cn(
+            "px-4 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center gap-2 whitespace-nowrap",
+            activeTab === 'history' ? "bg-emerald-600 text-white shadow-lg" : "bg-slate-900 border border-slate-800 text-slate-400 hover:text-white"
+          )}
+        >
+          <History className="w-4 h-4" /> Valuation Runs History
         </button>
       </div>
 
-      <div className="grid grid-cols-1 xl:grid-cols-3 gap-8">
-        {/* Left Column: Calculation Logic */}
-        <div className="space-y-6">
-          <AnimatePresence mode="wait">
+      {/* SUB-TAB 1: VALUATION WORKSPACE */}
+      {activeTab === 'workspace' && (
+        <div className="grid grid-cols-1 xl:grid-cols-3 gap-8">
+          {/* Left 2 Columns: Calculation & Asset Pricing Table */}
+          <div className="xl:col-span-2 space-y-6">
+            {/* Manual Adjustment Inputs if Manual Mode */}
             {valMethod === 'manual' && (
-              <motion.div 
-                initial={{ opacity: 0, height: 0 }}
-                animate={{ opacity: 1, height: 'auto' }}
-                exit={{ opacity: 0, height: 0 }}
-                className="bg-blue-600/5 border border-blue-500/20 rounded-3xl p-6 overflow-hidden space-y-6"
-              >
+              <div className="bg-blue-600/10 border border-blue-500/30 rounded-3xl p-6 space-y-6">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
-                    <div className="w-8 h-8 bg-blue-600/20 rounded-xl flex items-center justify-center">
-                      <Zap className="w-4 h-4 text-blue-500" />
+                    <div className="w-8 h-8 bg-blue-500/20 rounded-xl flex items-center justify-center text-blue-400">
+                      <Zap className="w-4 h-4" />
                     </div>
                     <div>
-                      <h3 className="text-sm font-bold text-white uppercase tracking-wider">Manual Adjustment</h3>
-                      <p className="text-[10px] text-slate-500">Fine-tune fund performance</p>
+                      <h3 className="text-sm font-bold text-white uppercase tracking-wider">Manual Valuation Adjustment</h3>
+                      <p className="text-[10px] text-slate-400">Override asset prices or set target published NAV</p>
                     </div>
                   </div>
                   <input 
                     type="date"
                     value={manualDate}
                     onChange={(e) => setManualDate(e.target.value)}
-                    className="bg-slate-950/50 border border-slate-800 rounded-lg px-3 py-1.5 text-[10px] font-bold text-slate-400 focus:border-blue-500 outline-none"
+                    className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-white outline-none"
                   />
                 </div>
 
-                <div className="space-y-4">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div className="space-y-2">
-                    <label className="text-[10px] font-bold text-slate-500 uppercase">Target Asset</label>
-                    <select 
-                      value={selectedAssetId}
-                      onChange={(e) => {
-                        setSelectedAssetId(e.target.value);
-                        setNewAssetPrice('');
-                        setManualGain('');
-                        setGainLossPct('');
-                      }}
-                      className="w-full bg-slate-950/50 border border-slate-800 rounded-xl px-4 py-3 text-sm text-white focus:border-blue-500 outline-none"
-                    >
-                      <option value="all">Entire Portfolio (Global Adjustment)</option>
-                      {portfolio.map(asset => (
-                        <option key={asset.id} value={asset.id}>{asset.ticker} - {asset.name}</option>
-                      ))}
-                    </select>
+                    <label className="text-[10px] font-bold text-emerald-400 uppercase tracking-wider">Direct Target NAV per Unit</label>
+                    <input 
+                      type="number"
+                      step="0.0001"
+                      value={targetPricePerUnit}
+                      onChange={(e) => handleTargetNavChange(e.target.value)}
+                      placeholder="e.g. 0.2700"
+                      className="w-full bg-slate-950 border border-emerald-500/40 rounded-xl px-4 py-3 text-base font-bold text-white outline-none focus:ring-2 focus:ring-emerald-500 font-mono"
+                    />
                   </div>
-
-                  {selectedAsset && (
-                    <motion.div 
-                      initial={{ opacity: 0, y: -10 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      className="grid grid-cols-2 gap-4 p-4 bg-slate-950/50 border border-slate-800 rounded-2xl"
-                    >
-                      <div className="space-y-1">
-                        <p className="text-[10px] text-slate-500 font-bold uppercase">Current Price</p>
-                        <p className="text-lg font-bold text-white">{formatCurrency(selectedAsset.currentPrice)}</p>
-                        <p className="text-[10px] text-slate-400">Total Units: {selectedAsset.quantity}</p>
-                      </div>
-                      <div className="space-y-2">
-                        <label className="text-[10px] text-slate-500 font-bold uppercase">New Market Price</label>
-                        <div className="relative group">
-                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs font-bold text-slate-600 group-focus-within:text-blue-500">GH₵</span>
-                          <input 
-                            type="number"
-                            value={newAssetPrice}
-                            onChange={(e) => handlePriceChange(e.target.value)}
-                            placeholder="0.00"
-                            className="w-full bg-slate-900 border border-slate-800 rounded-lg py-2 pl-10 pr-3 text-sm font-bold text-white focus:outline-none focus:border-blue-500 transition-all"
-                          />
-                        </div>
-                      </div>
-                    </motion.div>
-                  )}
-
-                  <div className="space-y-2 p-3 bg-emerald-500/5 border border-emerald-500/20 rounded-2xl">
-                    <label className="text-[10px] font-bold text-emerald-400 uppercase tracking-wider flex items-center justify-between">
-                      <span>Direct Published Price per Unit (NAV)</span>
-                      <span className="text-[9px] text-slate-500 font-normal">e.g. 0.27</span>
-                    </label>
-                    <div className="relative group">
-                      <span className="absolute left-4 top-1/2 -translate-y-1/2 text-sm font-bold text-emerald-500">GH₵</span>
-                      <input 
-                        type="number"
-                        step="0.0001"
-                        value={targetPricePerUnit}
-                        onChange={(e) => handleTargetNavChange(e.target.value)}
-                        placeholder="e.g. 0.2700"
-                        className="w-full bg-slate-950 border border-emerald-500/30 rounded-xl py-3 pl-12 pr-4 text-base font-black text-white focus:outline-none focus:border-emerald-500 transition-all placeholder:text-slate-700"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-4">
-                    <div className="space-y-2">
-                      <label className="text-[10px] font-bold text-slate-500 uppercase">Gain/Loss Amount</label>
-                      <div className="relative group">
-                        <span className="absolute left-4 top-1/2 -translate-y-1/2 text-sm font-bold text-slate-600 group-focus-within:text-blue-500">GH₵</span>
-                        <input 
-                          type="number"
-                          value={manualGain}
-                          onChange={(e) => handleGainChange(e.target.value)}
-                          placeholder="0.00"
-                          className="w-full bg-slate-950/50 border border-slate-800 rounded-xl py-3 pl-12 pr-4 text-sm font-bold text-white focus:outline-none focus:border-blue-500 transition-all placeholder:text-slate-800"
-                        />
-                      </div>
-                    </div>
-                    <div className="space-y-2">
-                      <label className="text-[10px] font-bold text-slate-500 uppercase">Performance %</label>
-                      <div className="relative group">
-                        <span className="absolute right-4 top-1/2 -translate-y-1/2 text-sm font-bold text-slate-600 group-focus-within:text-blue-500">%</span>
-                        <input 
-                          type="number"
-                          value={gainLossPct}
-                          onChange={(e) => handlePctChange(e.target.value)}
-                          placeholder="0.0"
-                          className="w-full bg-slate-950/50 border border-slate-800 rounded-xl py-3 pl-4 pr-10 text-sm font-bold text-white focus:outline-none focus:border-blue-500 transition-all placeholder:text-slate-800"
-                        />
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className={cn(
-                    "p-3 rounded-xl flex items-center gap-3",
-                    gainValue >= 0 ? "bg-emerald-500/10 text-emerald-500" : "bg-red-500/10 text-red-500"
-                  )}>
-                    <div className="w-6 h-6 rounded-lg bg-current/20 flex items-center justify-center">
-                      {gainValue >= 0 ? <TrendingUp className="w-3 h-3" /> : <TrendingUp className="w-3 h-3 rotate-180" />}
-                    </div>
-                    <div>
-                      <p className="text-[10px] font-bold uppercase">Impact Result</p>
-                      <p className="text-xs font-medium">This will {gainValue >= 0 ? 'increase' : 'decrease'} fund AUM by {formatCurrency(Math.abs(gainValue))}</p>
-                    </div>
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Gain / Loss Amount (GH₵)</label>
+                    <input 
+                      type="number"
+                      value={manualGain}
+                      onChange={(e) => handleGainChange(e.target.value)}
+                      placeholder="0.00"
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm font-bold text-white outline-none focus:ring-2 focus:ring-blue-500 font-mono"
+                    />
                   </div>
                 </div>
-              </motion.div>
+              </div>
             )}
-          </AnimatePresence>
 
-          <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6">
-            <h3 className="text-sm font-bold text-white mb-6 flex items-center gap-2 uppercase tracking-widest">
-              <Info className="w-4 h-4 text-emerald-500" />
-              NAV Calculation
-            </h3>
-            
-            <div className="space-y-6">
-              <div className="p-4 bg-slate-800/30 rounded-xl border border-slate-800">
-                <div className="mb-4">
-                  <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">AUM (Incl. Cash)</p>
-                  <p className="text-xl font-bold text-white mt-1">{formatCurrency(projectAum)}</p>
-                </div>
-                <div className="h-px bg-slate-800 mb-4" />
+            {/* Asset Valuation Table with Price Status Badges */}
+            <div className="bg-slate-900 border border-slate-800 rounded-3xl overflow-hidden shadow-2xl">
+              <div className="p-6 bg-slate-800/40 border-b border-slate-800 flex items-center justify-between">
                 <div>
-                  <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Units Outstanding</p>
-                  <p className="text-xl font-bold text-white mt-1">{totalUnits.toLocaleString()}</p>
+                  <h3 className="text-base font-bold text-white">Portfolio Securities & Price Status</h3>
+                  <p className="text-xs text-slate-400">Market-traded securities and price status inspection</p>
                 </div>
+                <span className="text-xs bg-slate-800 text-slate-300 border border-slate-700 px-3 py-1 rounded-full font-bold">
+                  {activePortfolio.length} Assets Held
+                </span>
               </div>
 
-              <div className="bg-emerald-500/5 border border-emerald-500/20 p-6 rounded-2xl text-center space-y-2">
-                <p className="text-emerald-500 text-[10px] font-bold uppercase tracking-widest">Projected Price per Unit (NAV)</p>
-                <h4 className="text-4xl font-black text-white tracking-tight">
-                  {formatCurrency(calculatedNAV)}
-                </h4>
-                <p className="text-[11px] text-slate-400 font-medium pt-1">
-                  Total Fund AUM: <span className="font-bold text-white">{formatCurrency(projectAum)}</span>
-                </p>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="bg-slate-950/50 border-b border-slate-800 text-[10px] text-slate-400 uppercase font-bold tracking-wider">
+                      <th className="px-6 py-4">Ticker / Asset</th>
+                      <th className="px-6 py-4 text-right">Holdings</th>
+                      <th className="px-6 py-4 text-right">Avg Cost</th>
+                      <th className="px-6 py-4 text-right">Market Price</th>
+                      <th className="px-6 py-4 text-right">Market Value</th>
+                      <th className="px-6 py-4 text-right">Unrealized P/L</th>
+                      <th className="px-6 py-4 text-center">Price Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/60 text-xs">
+                    {assetStatuses.map((ast) => {
+                      const origAsset = activePortfolio.find(a => a.id === ast.assetId);
+                      const gainLoss = ast.marketValue - (origAsset?.totalCostBasis || 0);
+
+                      return (
+                        <tr key={ast.assetId} className="hover:bg-slate-800/30 transition-colors">
+                          <td className="px-6 py-4 font-bold text-white">
+                            <div>{ast.ticker}</div>
+                            <div className="text-[10px] text-slate-500 font-normal">{ast.name}</div>
+                          </td>
+                          <td className="px-6 py-4 text-right font-mono text-slate-300">
+                            {origAsset?.quantity.toLocaleString()}
+                          </td>
+                          <td className="px-6 py-4 text-right font-mono text-slate-400">
+                            {formatCurrency(origAsset?.costBasis || 0)}
+                          </td>
+                          <td className="px-6 py-4 text-right font-mono font-bold text-white">
+                            {formatCurrency(ast.currentPrice)}
+                          </td>
+                          <td className="px-6 py-4 text-right font-mono font-bold text-emerald-400">
+                            {formatCurrency(ast.marketValue)}
+                          </td>
+                          <td className={cn("px-6 py-4 text-right font-mono font-bold", gainLoss >= 0 ? "text-emerald-400" : "text-red-400")}>
+                            {gainLoss >= 0 ? '+' : ''}{formatCurrency(gainLoss)}
+                          </td>
+                          <td className="px-6 py-4 text-center">
+                            {ast.status === 'PRICED' && (
+                              <span className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2.5 py-0.5 rounded-full text-[10px] font-bold">
+                                PRICED
+                              </span>
+                            )}
+                            {ast.status === 'STALE' && (
+                              <span className="bg-amber-500/10 text-amber-400 border border-amber-500/20 px-2.5 py-0.5 rounded-full text-[10px] font-bold" title={ast.warningMessage}>
+                                STALE ({ast.daysStale}d)
+                              </span>
+                            )}
+                            {ast.status === 'MANUAL' && (
+                              <span className="bg-blue-500/10 text-blue-400 border border-blue-500/20 px-2.5 py-0.5 rounded-full text-[10px] font-bold">
+                                MANUAL
+                              </span>
+                            )}
+                            {ast.status === 'MISSING' && (
+                              <span className="bg-red-500/10 text-red-400 border border-red-500/20 px-2.5 py-0.5 rounded-full text-[10px] font-bold">
+                                MISSING
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Fee Accrual Widget */}
+            <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 space-y-4">
+              <div className="flex items-center justify-between">
+                <h3 className="text-base font-bold text-white flex items-center gap-2">
+                  <DollarSign className="w-5 h-5 text-amber-500" />
+                  Daily Expense & Fee Accruals Engine
+                </h3>
+                <span className="text-xs text-slate-400 font-mono">365-Day Count Convention</span>
               </div>
 
-              <button
-                type="button"
-                onClick={runValuation}
-                disabled={isCalculating || !fund}
-                className={cn(
-                  "w-full py-4 px-6 rounded-2xl font-black text-base flex items-center justify-center gap-3 transition-all shadow-xl border",
-                  isCalculating 
-                    ? "bg-slate-800 text-slate-500 border-slate-700 cursor-not-allowed" 
-                    : "bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-400/30 shadow-emerald-600/30 active:scale-[0.99]"
-                )}
-              >
-                {isCalculating ? (
-                  <>
-                    <RefreshCw className="w-5 h-5 animate-spin" />
-                    <span>Publishing Valuation to Account...</span>
-                  </>
-                ) : (
-                  <>
-                    <Send className="w-5 h-5" />
-                    <span>Publish Valuation ({formatCurrency(calculatedNAV)})</span>
-                  </>
-                )}
-              </button>
-              
-              <div className="bg-amber-500/5 border border-amber-500/20 p-4 rounded-xl flex gap-3">
-                <AlertCircle className="w-4 h-4 text-amber-500 flex-shrink-0 mt-0.5" />
-                <p className="text-slate-400 text-[10px] leading-relaxed">
-                  Valuations should be run at business close. Verify asset prices before publishing.
-                </p>
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-4 text-xs">
+                <div className="p-4 bg-slate-800/40 rounded-2xl border border-slate-800 space-y-1">
+                  <span className="text-slate-500 uppercase text-[10px] font-bold">Daily Mgmt Fee (1.50%)</span>
+                  <p className="text-lg font-bold text-white">{formatCurrency(feeAccruals.dailyManagementFee)}</p>
+                </div>
+                <div className="p-4 bg-slate-800/40 rounded-2xl border border-slate-800 space-y-1">
+                  <span className="text-slate-500 uppercase text-[10px] font-bold">Daily Custody Fee (0.25%)</span>
+                  <p className="text-lg font-bold text-white">{formatCurrency(feeAccruals.dailyCustodyFee)}</p>
+                </div>
+                <div className="p-4 bg-slate-800/40 rounded-2xl border border-slate-800 space-y-1">
+                  <span className="text-slate-500 uppercase text-[10px] font-bold">Daily Admin Fee (0.10%)</span>
+                  <p className="text-lg font-bold text-white">{formatCurrency(feeAccruals.dailyAdminFee)}</p>
+                </div>
+                <div className="p-4 bg-amber-500/10 border border-amber-500/20 rounded-2xl space-y-1">
+                  <span className="text-amber-400 uppercase text-[10px] font-bold">Total Daily Accrual</span>
+                  <p className="text-lg font-bold text-amber-300">{formatCurrency(feeAccruals.totalDailyAccrual)}</p>
+                </div>
               </div>
             </div>
           </div>
-        </div>
 
-        {/* Middle Column: Gemini Intelligence Chat */}
-        <div className="lg:col-span-1">
-          <ValuationIntelligence 
-            fund={fund}
-            portfolio={portfolio}
-            investors={investors}
-            valuations={valuations}
-          />
+          {/* Right Column: AI Valuation Intelligence Chat */}
+          <div>
+            <ValuationIntelligence 
+              fund={fund}
+              portfolio={activePortfolio}
+              investors={activeInvestors}
+              valuations={valuations}
+            />
+          </div>
         </div>
+      )}
 
-        {/* Right Column: Recent History */}
-        <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 flex flex-col h-[600px]">
-          <div className="flex items-center justify-between mb-6">
-            <h3 className="text-sm font-bold text-white flex items-center gap-2 uppercase tracking-widest">
-              <History className="w-4 h-4 text-emerald-500" />
-              History
+      {/* SUB-TAB 2: NAV MOVEMENT BRIDGE */}
+      {activeTab === 'nav_bridge' && (
+        <div className="bg-slate-900 border border-slate-800 rounded-3xl p-8 space-y-8 shadow-2xl">
+          <div>
+            <h3 className="text-2xl font-bold text-white">NAV Waterfall Movement Bridge</h3>
+            <p className="text-slate-400 text-sm mt-1">
+              Decomposes per-unit NAV movement from Previous Valuation into performance vs cash flow components.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-6 gap-4 text-center">
+            <div className="p-5 bg-slate-800/40 border border-slate-800 rounded-2xl space-y-1">
+              <span className="text-slate-500 uppercase text-[10px] font-bold">Opening NAV</span>
+              <p className="text-xl font-bold text-white font-mono">GH₵{navBridge.previousNav.toFixed(4)}</p>
+            </div>
+            <div className="p-5 bg-emerald-500/10 border border-emerald-500/20 rounded-2xl space-y-1">
+              <span className="text-emerald-400 uppercase text-[10px] font-bold">Portfolio Impact</span>
+              <p className="text-xl font-bold text-emerald-400 font-mono">
+                {navBridge.portfolioMovement >= 0 ? '+' : ''}{navBridge.portfolioMovement.toFixed(4)}
+              </p>
+            </div>
+            <div className="p-5 bg-blue-500/10 border border-blue-500/20 rounded-2xl space-y-1">
+              <span className="text-blue-400 uppercase text-[10px] font-bold">Realized Gains</span>
+              <p className="text-xl font-bold text-blue-400 font-mono">
+                +{navBridge.realizedGainMovement.toFixed(4)}
+              </p>
+            </div>
+            <div className="p-5 bg-red-500/10 border border-red-500/20 rounded-2xl space-y-1">
+              <span className="text-red-400 uppercase text-[10px] font-bold">Fee Accruals</span>
+              <p className="text-xl font-bold text-red-400 font-mono">
+                {navBridge.expenseMovement.toFixed(4)}
+              </p>
+            </div>
+            <div className="p-5 bg-slate-800/40 border border-slate-800 rounded-2xl space-y-1">
+              <span className="text-slate-400 uppercase text-[10px] font-bold">Cash Flows</span>
+              <p className="text-xl font-bold text-slate-200 font-mono">
+                {navBridge.netCashFlowMovement.toFixed(4)}
+              </p>
+            </div>
+            <div className="p-5 bg-emerald-600 text-white rounded-2xl space-y-1 shadow-lg shadow-emerald-600/20">
+              <span className="text-emerald-100 uppercase text-[10px] font-bold">Closing NAV</span>
+              <p className="text-2xl font-black font-mono">GH₵{navBridge.closingNav.toFixed(4)}</p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* SUB-TAB 3: RECONCILIATION & EXCEPTIONS */}
+      {activeTab === 'exceptions' && (
+        <div className="space-y-6">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl p-8 space-y-6">
+            <h3 className="text-2xl font-bold text-white flex items-center gap-3">
+              <Scale className="w-6 h-6 text-amber-500" />
+              Valuation Exceptions & Anomaly Inspector
             </h3>
-            <div className="flex items-center gap-2 relative">
-              <AnimatePresence>
-                {showResetConfirm && (
-                  <motion.div 
-                    initial={{ opacity: 0, x: 20 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    exit={{ opacity: 0, x: 20 }}
-                    className="absolute right-0 top-full mt-2 p-4 bg-slate-900 border border-red-500/50 rounded-xl shadow-2xl z-50 w-64"
-                  >
-                    <p className="text-xs text-slate-300 mb-3">CRITICAL: Clear all history and reset NAV to 1.0000? This cannot be undone.</p>
-                    <div className="space-y-2">
-                      <button 
-                        onClick={handleReset}
-                        className="w-full py-1.5 bg-red-600 hover:bg-red-500 text-white rounded text-[10px] font-bold"
-                      >
-                        Reset to 1.0000
-                      </button>
-                      <button 
-                        onClick={handleMagicReset}
-                        className="w-full py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-[10px] font-bold"
-                      >
-                        Magic Reset (19%)
-                      </button>
-                      <button 
-                        onClick={() => setShowResetConfirm(false)}
-                        className="w-full py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-[10px] font-bold"
-                      >
-                        Cancel
-                      </button>
-                    </div>
-                  </motion.div>
-                )}
 
-                {showUndoConfirm && (
-                  <motion.div 
-                    initial={{ opacity: 0, x: 20 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    exit={{ opacity: 0, x: 20 }}
-                    className="absolute right-0 top-full mt-2 p-4 bg-slate-900 border border-amber-500/50 rounded-xl shadow-2xl z-50 w-60"
-                  >
-                    <p className="text-xs text-slate-300 mb-3">Undo the latest valuation record? Account state will revert.</p>
-                    <div className="flex gap-2">
-                      <button 
-                        onClick={handleUndo}
-                        className="flex-1 py-1.5 bg-amber-600 hover:bg-amber-500 text-white rounded text-[10px] font-bold"
-                      >
-                        Undo Record
-                      </button>
-                      <button 
-                        onClick={() => setShowUndoConfirm(false)}
-                        className="flex-1 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-[10px] font-bold"
-                      >
-                        Cancel
-                      </button>
+            {exceptions.length === 0 ? (
+              <div className="p-8 bg-emerald-500/10 border border-emerald-500/20 rounded-2xl text-center space-y-2">
+                <CheckCircle2 className="w-12 h-12 text-emerald-400 mx-auto" />
+                <h4 className="text-lg font-bold text-white">No Valuation Exceptions Detected</h4>
+                <p className="text-xs text-slate-400">All pricing, cash balances, liabilities, and unit ledgers reconcile cleanly.</p>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {exceptions.map(exc => (
+                  <div key={exc.id} className={cn(
+                    "p-6 rounded-2xl border space-y-2",
+                    exc.severity === 'CRITICAL' ? "bg-red-500/10 border-red-500/30" : "bg-amber-500/10 border-amber-500/30"
+                  )}>
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <span className={cn(
+                          "px-2.5 py-0.5 rounded text-[10px] font-bold uppercase",
+                          exc.severity === 'CRITICAL' ? "bg-red-500/20 text-red-300" : "bg-amber-500/20 text-amber-300"
+                        )}>
+                          {exc.severity}
+                        </span>
+                        <span className="font-mono text-xs text-slate-300 font-bold">{exc.code}</span>
+                      </div>
+                      <span className="text-xs text-slate-400">Affected Item: <strong className="text-white">{exc.item}</strong></span>
                     </div>
-                  </motion.div>
-                )}
-              </AnimatePresence>
 
-              {sortedValuations.length > 0 && revertedCount > 0 && (
+                    <p className="text-sm font-semibold text-white">{exc.description}</p>
+                    <p className="text-xs text-slate-400 leading-relaxed">
+                      💡 <strong className="text-slate-200">Recommended Action:</strong> {exc.recommendedAction}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* SUB-TAB 4: HISTORICAL VALUATION RUNS */}
+      {activeTab === 'history' && (
+        <div className="space-y-6">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 flex items-center justify-between">
+            <h3 className="text-xl font-bold text-white flex items-center gap-2">
+              <History className="w-5 h-5 text-emerald-500" />
+              Formal Valuation Runs History & Immutability Audit
+            </h3>
+
+            <div className="flex items-center gap-2">
+              {valuations.length > 0 && (
                 <button 
-                  onClick={handleRedo}
-                  disabled={isRedoing || isResetting}
-                  className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-emerald-500/10 text-emerald-500 hover:bg-emerald-500/20 transition-all text-xs font-bold disabled:opacity-50"
-                  title={`Redo latest undone valuation (${revertedCount} available)`}
+                  onClick={handleUndo}
+                  disabled={isUndoing}
+                  className="px-3.5 py-2 bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/30 rounded-xl text-xs font-bold transition-all flex items-center gap-2"
                 >
-                  <RefreshCw className={cn("w-3.5 h-3.5", isRedoing && "animate-spin")} />
-                  Redo
-                </button>
-              )}
-              {sortedValuations.length > 0 && (
-                <button 
-                  onClick={() => setShowUndoConfirm(true)}
-                  disabled={isUndoing || isResetting || isRedoing || showUndoConfirm}
-                  className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-red-500/10 text-red-500 hover:bg-red-500/20 transition-all text-xs font-bold disabled:opacity-50"
-                >
-                  <RotateCcw className={cn("w-3.5 h-3.5", isUndoing && "animate-spin")} />
-                  Undo
+                  <RotateCcw className={cn("w-3.5 h-3.5", isUndoing && "animate-spin")} /> Undo Latest Run
                 </button>
               )}
               <button 
                 onClick={() => setShowResetConfirm(true)}
-                disabled={isResetting || isUndoing || isRedoing || isCalculating || showResetConfirm}
-                className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-800 text-slate-500 hover:bg-red-600 hover:text-white transition-all text-xs font-bold disabled:opacity-50"
-                title="Clear all valuation history and reset fund"
+                className="px-3.5 py-2 bg-slate-800 hover:bg-red-600 text-slate-400 hover:text-white rounded-xl text-xs font-bold transition-all flex items-center gap-2"
               >
-                <Trash2 className={cn("w-3.5 h-3.5", isResetting && "animate-pulse")} />
-                Reset Record
+                <Trash2 className="w-3.5 h-3.5" /> Reset Record
               </button>
             </div>
           </div>
-          <div className="space-y-4 max-h-[500px] overflow-y-auto pr-2 custom-scrollbar">
-            {sortedValuations.length > 0 ? (
-              sortedValuations.map((v, idx) => {
-                const prevVal = sortedValuations[idx + 1];
-                const change = prevVal ? v.nav - prevVal.nav : 0;
-                
-                return (
-                  <div key={v.id} className="p-4 bg-slate-800/30 rounded-xl border border-slate-800/50 group hover:border-slate-700 transition-all">
-                    <div className="flex items-center justify-between mb-2">
-                      <p className="text-xs text-slate-500">
-                        {v.date?.seconds 
-                          ? new Date(v.date.seconds * 1000).toLocaleString() 
-                          : 'Just now'}
-                      </p>
-                      {change !== 0 && (
-                        <div className={cn(
-                          "px-2 py-0.5 rounded text-[10px] font-bold",
-                          change > 0 ? "bg-emerald-500/10 text-emerald-500" : "bg-red-500/10 text-red-500"
-                        )}>
-                          {change > 0 ? '+' : ''}{change.toFixed(4)}
-                        </div>
-                      )}
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <p className="text-lg font-bold text-white">{formatCurrency(v.nav)}</p>
-                        <p className="text-[10px] text-slate-500 uppercase font-bold tracking-wider">NAV Price</p>
-                      </div>
-                      <div className="text-right">
-                        <p className="text-sm font-bold text-slate-400">{formatCurrency(v.aum)}</p>
-                        <p className="text-[10px] text-slate-500 uppercase font-bold tracking-wider">AUM</p>
-                      </div>
-                    </div>
-                    {v.notes && (
-                      <div className="mt-2 pt-2 border-t border-slate-800/50">
-                        <p className="text-[10px] text-slate-500 italic truncate" title={v.notes}>{v.notes}</p>
-                      </div>
-                    )}
-                  </div>
-                );
-              })
-            ) : (
-              <div className="py-10 text-center text-slate-500 text-sm">
-                No valuation history found.
-              </div>
-            )}
+
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl overflow-hidden shadow-2xl">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="bg-slate-950/50 border-b border-slate-800 text-[10px] text-slate-400 uppercase font-bold tracking-wider">
+                    <th className="px-6 py-4">Valuation Date</th>
+                    <th className="px-6 py-4">Run Number</th>
+                    <th className="px-6 py-4 text-right">Published NAV</th>
+                    <th className="px-6 py-4 text-right">Net Assets (AUM)</th>
+                    <th className="px-6 py-4 text-center">Status</th>
+                    <th className="px-6 py-4">Notes</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/60 text-xs">
+                  {valuations.map((v, idx) => (
+                    <tr key={v.id} className="hover:bg-slate-800/30 transition-colors">
+                      <td className="px-6 py-4 font-mono text-slate-300">
+                        {v.date?.seconds ? new Date(v.date.seconds * 1000).toLocaleString() : 'Just now'}
+                      </td>
+                      <td className="px-6 py-4 font-mono font-bold text-blue-400">
+                        VAL-{v.id.substring(0, 8)}
+                      </td>
+                      <td className="px-6 py-4 text-right font-mono font-bold text-emerald-400">
+                        {formatCurrency(v.nav)}
+                      </td>
+                      <td className="px-6 py-4 text-right font-mono text-white">
+                        {formatCurrency(v.aum)}
+                      </td>
+                      <td className="px-6 py-4 text-center">
+                        <span className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2.5 py-0.5 rounded-full text-[10px] font-bold flex items-center justify-center gap-1 w-fit mx-auto">
+                          <Lock className="w-3 h-3" /> FINAL
+                        </span>
+                      </td>
+                      <td className="px-6 py-4 text-slate-400 italic">
+                        {v.notes || 'Published Valuation'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {valuations.length === 0 && (
+                <div className="py-16 text-center text-slate-500 text-sm">
+                  No valuation history logged yet.
+                </div>
+              )}
+            </div>
           </div>
         </div>
-      </div>
-
-      {/* Success Notification */}
-      <AnimatePresence>
-        {lastResult && (
-          <motion.div 
-            initial={{ opacity: 0, y: 50 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: 50 }}
-            className="fixed bottom-8 left-1/2 -translate-x-1/2 bg-emerald-600 text-white px-8 py-4 rounded-2xl shadow-2xl flex items-center gap-4 z-50"
-          >
-            <CheckCircle2 className="w-6 h-6" />
-            <div>
-              <p className="font-bold">Valuation Published Successfully</p>
-              <p className="text-xs text-emerald-100">New NAV: {formatCurrency(lastResult.nav)} | AUM: {formatCurrency(lastResult.aum)}</p>
-            </div>
-            <button 
-              onClick={() => setLastResult(null)}
-              className="ml-4 p-1 hover:bg-emerald-500 rounded"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </motion.div>
-        )}
-      </AnimatePresence>
+      )}
     </div>
   );
 }

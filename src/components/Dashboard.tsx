@@ -3,6 +3,7 @@ import { InvestmentAccount, Investor, Asset, Valuation } from '../types';
 import { formatCurrency, cn } from '../lib/utils';
 import { toast } from 'sonner';
 import { reconcileAccountCash } from '../services/valuationService';
+import { calculateNetAssets, roundMoney } from '../services/fundAccountingEngine';
 import { 
   TrendingUp, 
   Users, 

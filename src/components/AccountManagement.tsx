@@ -29,7 +29,16 @@ import {
   Copy,
   MessageSquare,
   Eye,
-  EyeOff
+  EyeOff,
+  Building2,
+  HelpCircle,
+  ShieldCheck,
+  Scale,
+  Layers,
+  ChevronDown,
+  Globe,
+  Sliders,
+  Zap
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { addDoc, collection, doc, updateDoc, deleteDoc, getDocs, query, where, writeBatch, serverTimestamp, increment, runTransaction } from 'firebase/firestore';
@@ -115,63 +124,143 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
   const [selectedAccountForChat, setSelectedAccountForChat] = useState<InvestmentAccount | null>(null);
   const [isDuplicating, setIsDuplicating] = useState<string | null>(null);
   
-  const [newAccount, setNewAccount] = useState({
-    name: '',
-    ticker: '',
-    description: '',
-    aum: 0,
-    nav: 1.0000,
-    totalUnits: 0,
-    cashBalance: 0
+  const [newFund, setNewFund] = useState({
+    // Section 1: Fund Identity
+    name: '', // Fund Legal Name *
+    code: '', // Fund Code * (e.g. OGEF) - uppercase, unique, no spaces
+    ticker: '', // Optional Ticker Symbol (e.g. OGEF)
+    fundType: 'Equity Fund', // Fund Type *
+    fundStructure: 'Open-ended', // Fund Structure *
+    baseCurrency: 'GHS', // Base Currency *
+    domicile: 'Ghana', // Domicile / Jurisdiction *
+    inceptionDate: new Date().toISOString().split('T')[0], // Inception Date *
+    description: '', // Investment Objective
+
+    // Section 2: Regulatory & Administration
+    regulator: 'Securities and Exchange Commission — Ghana',
+    registrationNumber: '', // e.g. SEC/FUND/XXXX
+    lei: '', // Legal Entity Identifier (20 characters, optional)
+    fundManager: 'OmniFund Capital Ltd', // Fund Manager *
+    administrator: 'OmniFund Administration Services', // Fund Administrator
+    custodian: 'Standard Chartered Bank Ghana', // Custodian
+    auditor: 'KPMG Ghana', // Auditor
+
+    // Section 3: Valuation & Unit Setup
+    navFrequency: 'Daily', // NAV Calculation Frequency *
+    valuationFrequency: 'Daily', // Valuation Frequency *
+    pricingMethod: 'Forward Pricing', // Pricing Method
+    nav: 1.0000, // NAV per Unit * (default 1.0000, up to 6 decimal places)
+    totalUnits: 0, // Opening Units *
+    aum: 0, // Opening Net Assets = NAV * Units (Read-only calculated)
+    initializeZeroBalance: true, // Default to zero opening balance
+
+    // Setup Mode Toggle (Quick vs Full Institutional)
+    setupMode: 'QUICK' as 'QUICK' | 'FULL',
+
+    // Progressive Disclosure Toggles
+    showAdvancedIdentity: false,
+    showAdvancedRegulatory: false,
+    showAdvancedValuation: false
   });
 
-  // Auto-calculate total units when AUM or NAV changes
-  useEffect(() => {
-    if (newAccount.nav > 0) {
-      const calculatedUnits = newAccount.aum / newAccount.nav;
-      if (newAccount.totalUnits !== calculatedUnits) {
-        setNewAccount(prev => ({ ...prev, totalUnits: calculatedUnits }));
-      }
-    }
-  }, [newAccount.aum, newAccount.nav]);
+  const [createdFundConfirmation, setCreatedFundConfirmation] = useState<InvestmentAccount | null>(null);
+  const [showShareClassModal, setShowShareClassModal] = useState(false);
+  const [shareClassForm, setShareClassForm] = useState({
+    name: 'Class A (Retail)',
+    type: 'Retail',
+    currency: 'GHS',
+    nav: 1.0000
+  });
 
-  const handleAddAccount = async (e: React.FormEvent) => {
+  // Calculate Opening Net Assets = NAV * Opening Units (or 0 if zero balance)
+  useEffect(() => {
+    if (newFund.initializeZeroBalance) {
+      setNewFund(prev => ({
+        ...prev,
+        totalUnits: 0,
+        aum: 0
+      }));
+    } else {
+      const calculatedAum = Number((newFund.nav * newFund.totalUnits).toFixed(2));
+      setNewFund(prev => ({
+        ...prev,
+        aum: calculatedAum
+      }));
+    }
+  }, [newFund.nav, newFund.totalUnits, newFund.initializeZeroBalance]);
+
+  // Code Uniqueness Check
+  const isCodeDuplicate = useMemo(() => {
+    if (!newFund.code.trim()) return false;
+    const c = newFund.code.trim().toUpperCase();
+    return accounts.some(a => (a.code && a.code.toUpperCase() === c) || a.ticker.toUpperCase() === c);
+  }, [newFund.code, accounts]);
+
+  // LEI 20-character Validation
+  const isLeiInvalid = useMemo(() => {
+    if (!newFund.lei.trim()) return false;
+    return newFund.lei.trim().length !== 20;
+  }, [newFund.lei]);
+
+  const handleAddFund = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isCodeDuplicate) {
+      toast.error(`Fund Code '${newFund.code}' is already in use by an existing fund.`);
+      return;
+    }
+    if (isLeiInvalid) {
+      toast.error('Legal Entity Identifier (LEI) must be exactly 20 characters.');
+      return;
+    }
+
     setIsProvisioning(true);
     try {
-      // 1. Create the Account Document
-      const docRef = await addDoc(collection(db, 'accounts'), {
-        ...newAccount,
-        cashBalance: newAccount.aum, // Initial AUM is all cash
-        lastValuationDate: new Date().toISOString(),
-        createdAt: new Date().toISOString()
-      });
-
-      const createdAccount: InvestmentAccount = {
-        id: docRef.id,
-        ...newAccount,
-        cashBalance: newAccount.aum,
+      const fundPayload = {
+        name: newFund.name.trim(),
+        code: newFund.code.trim().toUpperCase(),
+        ticker: (newFund.ticker.trim() || newFund.code.trim()).toUpperCase(),
+        description: newFund.description.trim(),
+        fundType: newFund.fundType,
+        fundStructure: newFund.fundStructure,
+        baseCurrency: newFund.baseCurrency,
+        domicile: newFund.domicile,
+        inceptionDate: newFund.inceptionDate,
+        regulator: newFund.regulator,
+        registrationNumber: newFund.registrationNumber.trim(),
+        lei: newFund.lei.trim().toUpperCase(),
+        fundManager: newFund.fundManager,
+        administrator: newFund.administrator,
+        custodian: newFund.custodian,
+        auditor: newFund.auditor,
+        navFrequency: newFund.navFrequency,
+        valuationFrequency: newFund.valuationFrequency,
+        pricingMethod: newFund.pricingMethod,
+        nav: Number(newFund.nav) || 1.0000,
+        totalUnits: Number(newFund.totalUnits) || 0,
+        aum: Number(newFund.aum) || 0,
+        cashBalance: Number(newFund.aum) || 0,
         lastValuationDate: new Date().toISOString(),
         createdAt: new Date().toISOString()
       };
 
-      // 2. If Smart Ingestion was used, Provision the data
+      const docRef = await addDoc(collection(db, 'accounts'), fundPayload);
+
+      const createdAccount: InvestmentAccount = {
+        id: docRef.id,
+        ...fundPayload
+      };
+
       if (ingestionResult) {
         const stp = new STPService();
-        // We include the newly created account in the context
         const stpResult = await stp.provision(ingestionResult, { 
           accounts: [...accounts, createdAccount], 
           investors 
         });
         setStpLogs(stpResult.logs);
-        console.log("Ingestion Provisioning Result:", stpResult);
       }
 
-      setIsAddModalOpen(false);
-      setNewAccount({ name: '', ticker: '', description: '', aum: 0, nav: 1.0000, totalUnits: 0, cashBalance: 0 });
-      setIngestionResult(null);
-      setIngestionFiles([]);
-      setStpLogs([]);
+      setCreatedFundConfirmation(createdAccount);
+      toast.success(`Fund '${createdAccount.name}' created successfully!`);
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, 'accounts');
     } finally {
@@ -218,13 +307,14 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
           .filter(m => m.fundTicker === primaryFund.ticker)
           .reduce((sum, m) => {
             const fund = result.entities.funds.find(f => f.ticker === m.fundTicker);
-            const nav = fund?.nav || primaryFund.nav || newAccount.nav || 1;
+            const nav = fund?.nav || primaryFund.nav || newFund.nav || 1;
             return sum + (m.units * nav);
           }, 0);
 
-        setNewAccount(prev => ({
+        setNewFund(prev => ({
           ...prev,
           name: primaryFund.name || prev.name,
+          code: (primaryFund.ticker || prev.code || prev.ticker).toUpperCase(),
           ticker: (primaryFund.ticker || prev.ticker).toUpperCase(),
           aum: assetValue || subscriptionValue || prev.aum,
           nav: primaryFund.nav || prev.nav || 1.0000
@@ -304,44 +394,47 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
 
     setIsDeleting(true);
     try {
-      // 1. Parallelize fetching all associated document references for all accounts
+      // 1. Parallelize fetching all associated document references safely
       const allDeletions = await Promise.all(idsToDelete.map(async (accId) => {
-        const [portfolioSnap, investorsSnap, transactionsSnap, valuationsSnap] = await Promise.all([
-          getDocs(query(collection(db, 'portfolio'), where('accountId', '==', accId))),
-          getDocs(query(collection(db, 'investors'), where('accountId', '==', accId))),
-          getDocs(query(collection(db, 'transactions'), where('accountId', '==', accId))),
-          getDocs(query(collection(db, 'valuations'), where('accountId', '==', accId)))
+        const refs = [doc(db, 'accounts', accId)];
+
+        const safeGetDocRefs = async (collectionName: string) => {
+          try {
+            const snap = await getDocs(query(collection(db, collectionName), where('accountId', '==', accId)));
+            return snap.docs.map(d => d.ref);
+          } catch (e) {
+            console.warn(`Could not query ${collectionName} for account ${accId}:`, e);
+            return [];
+          }
+        };
+
+        const [pRefs, iRefs, tRefs, vRefs] = await Promise.all([
+          safeGetDocRefs('portfolio'),
+          safeGetDocRefs('investors'),
+          safeGetDocRefs('transactions'),
+          safeGetDocRefs('valuations')
         ]);
 
-        return [
-          ...portfolioSnap.docs.map(d => d.ref),
-          ...investorsSnap.docs.map(d => d.ref),
-          ...transactionsSnap.docs.map(d => d.ref),
-          ...valuationsSnap.docs.map(d => d.ref),
-          doc(db, 'accounts', accId)
-        ];
+        return [...refs, ...pRefs, ...iRefs, ...tRefs, ...vRefs];
       }));
 
       const allRefs = allDeletions.flat();
 
-      // 2. Chunk deletions into batches (Firestore limit is 500 ops per batch)
-      const CHUNK_SIZE = 450;
-      const batches = [];
-      
+      // 2. Chunk deletions into sequential batches (Firestore limit is 500 ops per batch)
+      const CHUNK_SIZE = 400;
       for (let i = 0; i < allRefs.length; i += CHUNK_SIZE) {
         const batch = writeBatch(db);
         const chunk = allRefs.slice(i, i + CHUNK_SIZE);
         chunk.forEach(ref => batch.delete(ref));
-        batches.push(batch.commit());
+        await batch.commit();
       }
 
-      await Promise.all(batches);
-      
       setIsDeleteModalOpen(false);
       setAccountToDelete(null);
       setSelectedAccountIds(new Set());
       setPinInput("");
       setPinError(false);
+      toast.success(idsToDelete.length === 1 ? 'Fund deleted successfully.' : `${idsToDelete.length} funds deleted successfully.`);
     } catch (error) {
       handleFirestoreError(error, OperationType.DELETE, `accounts/${idsToDelete.join(',')}`);
     } finally {
@@ -1071,217 +1164,1003 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
         )}
       </AnimatePresence>
 
-      {/* Create Account Modal */}
+      {/* Redesigned Create New Fund Workflow Modal — Institutional Standard */}
       <AnimatePresence>
         {isAddModalOpen && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-md">
             <motion.div 
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              onClick={() => setIsAddModalOpen(false)}
-              className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm"
-            />
-            <motion.div 
-              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              initial={{ opacity: 0, scale: 0.95, y: 15 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95, y: 20 }}
-              className="relative w-full max-w-lg bg-slate-900 border border-slate-800 rounded-3xl p-8 shadow-2xl"
+              exit={{ opacity: 0, scale: 0.95, y: 15 }}
+              className={cn(
+                "relative w-full bg-slate-900 border border-slate-800 rounded-3xl overflow-hidden shadow-2xl max-h-[92vh] flex flex-col transition-all duration-300",
+                newFund.setupMode === 'QUICK' ? "max-w-2xl" : "max-w-6xl"
+              )}
             >
-              <h3 className="text-2xl font-bold text-white mb-6">Create Investment Account</h3>
-              <form onSubmit={handleAddAccount} className="space-y-6">
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium text-slate-400">Account Name</label>
-                    <input 
-                      required
-                      type="text" 
-                      value={newAccount.name}
-                      onChange={(e) => setNewAccount({...newAccount, name: e.target.value})}
-                      className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
-                      placeholder="e.g. Retirement Fund"
-                    />
+              {/* Modal Header */}
+              <div className="p-6 bg-gradient-to-r from-emerald-950/40 via-slate-900 to-slate-900 border-b border-slate-800 flex items-center justify-between flex-shrink-0 gap-4 flex-wrap sm:flex-nowrap">
+                <div className="flex items-center gap-3">
+                  <div className="p-3 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400">
+                    <Building2 className="w-6 h-6" />
                   </div>
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium text-slate-400">Ticker Symbol</label>
-                    <input 
-                      required
-                      type="text" 
-                      value={newAccount.ticker}
-                      onChange={(e) => setNewAccount({...newAccount, ticker: e.target.value.toUpperCase()})}
-                      className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
-                      placeholder="e.g. RET-GHS"
-                    />
-                  </div>
-                </div>
-                <div className="space-y-2">
-                  <label className="text-sm font-medium text-slate-400">Description</label>
-                  <textarea 
-                    value={newAccount.description}
-                    onChange={(e) => setNewAccount({...newAccount, description: e.target.value})}
-                    className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all h-24 resize-none"
-                    placeholder="Describe the purpose of this account..."
-                  />
-                </div>
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium text-slate-400">Initial NAV per Unit (GH₵)</label>
-                    <input 
-                      required
-                      type="number" 
-                      step="0.0001"
-                      value={newAccount.nav}
-                      onChange={(e) => setNewAccount({...newAccount, nav: Number(e.target.value)})}
-                      className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium text-slate-400">Initial AUM (GH₵)</label>
-                    <input 
-                      required
-                      type="number" 
-                      value={newAccount.aum}
-                      onChange={(e) => setNewAccount({...newAccount, aum: Number(e.target.value)})}
-                      className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
-                    />
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h3 className="text-xl font-bold text-white">Create New Fund</h3>
+                    </div>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      {newFund.setupMode === 'QUICK' 
+                        ? 'Quick setup: fill in 5 core fields to initialize fund immediately'
+                        : 'Full setup: legal entity, regulatory registration, service providers & initial capitalization'
+                      }
+                    </p>
                   </div>
                 </div>
 
-                <div className="space-y-2">
-                  <label className="text-sm font-medium text-slate-400">Calculated Total Units</label>
-                  <input 
-                    readOnly
-                    type="text" 
-                    value={newAccount.totalUnits.toLocaleString(undefined, { maximumFractionDigits: 4 })}
-                    className="w-full bg-slate-800/50 border border-slate-700 rounded-xl px-4 py-3 text-slate-400 cursor-not-allowed outline-none transition-all font-mono"
-                  />
-                  <p className="text-[10px] text-slate-500 italic">Total Units = Initial AUM ÷ Initial NAV per Unit</p>
+                <div className="flex items-center gap-3">
+                  {/* SETUP MODE SWITCHER */}
+                  <div className="flex items-center gap-1 p-1 bg-slate-950 border border-slate-800 rounded-xl">
+                    <button
+                      type="button"
+                      onClick={() => setNewFund(prev => ({ ...prev, setupMode: 'QUICK' }))}
+                      className={cn(
+                        "px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5",
+                        newFund.setupMode === 'QUICK' ? "bg-emerald-600 text-white shadow-md" : "text-slate-400 hover:text-slate-200"
+                      )}
+                    >
+                      <Zap className="w-3.5 h-3.5 text-amber-300" />
+                      Quick Setup (5 Fields)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setNewFund(prev => ({ ...prev, setupMode: 'FULL' }))}
+                      className={cn(
+                        "px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5",
+                        newFund.setupMode === 'FULL' ? "bg-emerald-600 text-white shadow-md" : "text-slate-400 hover:text-slate-200"
+                      )}
+                    >
+                      <Sliders className="w-3.5 h-3.5" />
+                      Full Setup
+                    </button>
+                  </div>
+
+                  <button 
+                    onClick={() => {
+                      setIsAddModalOpen(false);
+                      setCreatedFundConfirmation(null);
+                    }}
+                    disabled={isProvisioning}
+                    className="text-slate-400 hover:text-white p-2 rounded-xl hover:bg-slate-800 transition-colors"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
                 </div>
-                         <div className="bg-blue-500/5 border border-blue-500/20 p-4 rounded-2xl flex flex-col gap-4">
-                  <div className="flex gap-3">
-                    <Sparkles className="w-5 h-5 text-blue-500 flex-shrink-0" />
-                    <div>
-                      <h4 className="text-sm font-bold text-white mb-1">Smart Ingestion (Optional)</h4>
-                      <p className="text-xs text-slate-400">
-                        Upload custodian files to automatically populate account data and bootstrap historical holdings.
-                      </p>
+              </div>
+
+              {/* POST-CREATION CONFIRMATION DIALOG */}
+              {createdFundConfirmation ? (
+                <div className="p-8 overflow-y-auto space-y-6 flex-1 text-center">
+                  <div className="w-16 h-16 bg-emerald-500/10 border border-emerald-500/20 rounded-3xl flex items-center justify-center mx-auto text-emerald-400 shadow-xl">
+                    <CheckCircle2 className="w-10 h-10" />
+                  </div>
+                  <div className="space-y-2">
+                    <h3 className="text-2xl font-bold text-white">Fund Created Successfully</h3>
+                    <p className="text-sm text-slate-400 max-w-md mx-auto">
+                      <strong className="text-white">{createdFundConfirmation.name}</strong> ({createdFundConfirmation.code || createdFundConfirmation.ticker}) has been provisioned on the authoritative ledger.
+                    </p>
+                  </div>
+
+                  {/* Created Fund Parameters KPI */}
+                  <div className="max-w-2xl mx-auto grid grid-cols-2 sm:grid-cols-4 gap-3 text-left p-4 bg-slate-950/80 border border-slate-800 rounded-2xl">
+                    <div className="space-y-0.5">
+                      <span className="text-[10px] text-slate-500 uppercase font-bold">Fund Code</span>
+                      <p className="text-sm font-bold text-white font-mono">{createdFundConfirmation.code || createdFundConfirmation.ticker}</p>
+                    </div>
+                    <div className="space-y-0.5">
+                      <span className="text-[10px] text-slate-500 uppercase font-bold">Structure</span>
+                      <p className="text-xs font-semibold text-slate-300">{createdFundConfirmation.fundStructure || 'Open-ended'}</p>
+                    </div>
+                    <div className="space-y-0.5">
+                      <span className="text-[10px] text-slate-500 uppercase font-bold">Opening NAV</span>
+                      <p className="text-xs font-mono font-bold text-emerald-400">GH₵{createdFundConfirmation.nav.toFixed(4)}</p>
+                    </div>
+                    <div className="space-y-0.5">
+                      <span className="text-[10px] text-slate-500 uppercase font-bold">Opening Net Assets</span>
+                      <p className="text-xs font-mono font-bold text-white">{formatCurrency(createdFundConfirmation.aum)}</p>
                     </div>
                   </div>
 
-                  <div className="relative">
-                    <input 
-                      type="file" 
-                      id="smart-ingestion"
-                      className="hidden" 
-                      onChange={handleIngestionFileSelect}
-                      multiple
-                      accept=".csv,.xlsx,.xls,.pdf,.json,.xml"
-                    />
-                    <label 
-                      htmlFor="smart-ingestion"
-                      className={cn(
-                        "flex items-center justify-center gap-2 w-full py-4 border-2 border-dashed rounded-xl cursor-pointer transition-all",
-                        ingestionResult ? "border-emerald-500/50 bg-emerald-500/5 text-emerald-500" : "border-slate-700 bg-slate-800/50 text-slate-400 hover:border-blue-500/50 hover:bg-blue-500/5"
-                      )}
+                  {/* Next Workflow Recommendations */}
+                  <div className="max-w-2xl mx-auto text-left space-y-3 pt-2">
+                    <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Next Recommended Fund Setup Steps</h4>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div className="p-4 bg-slate-900 border border-slate-800 rounded-2xl flex items-start gap-3 hover:border-emerald-500/40 transition-all cursor-pointer" onClick={() => setShowShareClassModal(true)}>
+                        <Layers className="w-5 h-5 text-emerald-400 flex-shrink-0 mt-0.5" />
+                        <div>
+                          <h5 className="text-xs font-bold text-white">Add Share Classes</h5>
+                          <p className="text-[11px] text-slate-400 mt-0.5">Configure Class A (Retail), Class I (Institutional) or Multi-Currency tranches</p>
+                        </div>
+                      </div>
+
+                      <div className="p-4 bg-slate-900 border border-slate-800 rounded-2xl flex items-start gap-3 hover:border-blue-500/40 transition-all cursor-pointer">
+                        <Sliders className="w-5 h-5 text-blue-400 flex-shrink-0 mt-0.5" />
+                        <div>
+                          <h5 className="text-xs font-bold text-white">Valuation & Fee Rules</h5>
+                          <p className="text-[11px] text-slate-400 mt-0.5">Set management fees, performance fees, custody rates & accrual frequencies</p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="pt-4 flex items-center justify-center gap-4">
+                    <button 
+                      onClick={() => {
+                        setIsAddModalOpen(false);
+                        setCreatedFundConfirmation(null);
+                      }}
+                      className="px-6 py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl transition-all shadow-lg shadow-emerald-600/20"
                     >
-                      {isIngesting ? (
+                      Continue to Fund Dashboard
+                    </button>
+                  </div>
+                </div>
+              ) : newFund.setupMode === 'QUICK' ? (
+                /* QUICK SETUP FORM (COMPACT 5 ESSENTIAL FIELDS) */
+                <form onSubmit={handleAddFund} className="flex-1 overflow-y-auto p-6 space-y-5 text-xs">
+                  <div className="p-5 bg-slate-950/70 border border-slate-800 rounded-2xl space-y-4">
+                    <div className="border-b border-slate-800 pb-3 flex items-center justify-between">
+                      <div>
+                        <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                          <Zap className="w-4 h-4 text-amber-400" />
+                          Core Fund Parameters
+                        </h4>
+                        <p className="text-[11px] text-slate-400 mt-0.5">Enter core identity parameters to launch fund immediately.</p>
+                      </div>
+                      <span className="text-[10px] font-mono bg-amber-500/10 text-amber-400 border border-amber-500/20 px-2 py-0.5 rounded-full font-bold">
+                        5 Essential Inputs
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      {/* Field 1: Fund Legal Name */}
+                      <div className="space-y-1.5">
+                        <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Fund Legal Name *</label>
+                        <input 
+                          required
+                          type="text" 
+                          value={newFund.name}
+                          onChange={(e) => setNewFund({...newFund, name: e.target.value})}
+                          placeholder="e.g. Omni Ghana Equity Fund"
+                          className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white font-semibold focus:border-emerald-500 outline-none"
+                          autoFocus
+                        />
+                      </div>
+
+                      {/* Field 2: Fund Code */}
+                      <div className="space-y-1.5">
+                        <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Fund Code *</label>
+                        <input 
+                          required
+                          type="text" 
+                          value={newFund.code}
+                          onChange={(e) => setNewFund({...newFund, code: e.target.value.toUpperCase().replace(/\s+/g, '')})}
+                          placeholder="e.g. OGEF"
+                          className={cn(
+                            "w-full bg-slate-900 border rounded-xl px-3.5 py-2.5 text-white font-mono font-bold tracking-wider outline-none",
+                            isCodeDuplicate ? "border-red-500 focus:ring-1 focus:ring-red-500" : "border-slate-800 focus:border-emerald-500"
+                          )}
+                        />
+                        {isCodeDuplicate && (
+                          <p className="text-[10px] text-red-400 font-medium flex items-center gap-1">
+                            <AlertTriangle className="w-3 h-3" /> Fund Code '{newFund.code}' is already in use.
+                          </p>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                      {/* Field 3: Fund Type */}
+                      <div className="space-y-1.5">
+                        <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Fund Type *</label>
+                        <select 
+                          required
+                          value={newFund.fundType}
+                          onChange={(e) => setNewFund({...newFund, fundType: e.target.value})}
+                          className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2.5 text-white font-medium focus:border-emerald-500 outline-none"
+                        >
+                          <option value="Equity Fund">Equity Fund</option>
+                          <option value="Fixed Income Fund">Fixed Income Fund</option>
+                          <option value="Money Market Fund">Money Market Fund</option>
+                          <option value="Balanced Fund">Balanced Fund</option>
+                          <option value="Index Fund">Index Fund</option>
+                          <option value="ETF">ETF</option>
+                          <option value="Real Estate Fund">Real Estate Fund</option>
+                          <option value="Private Equity Fund">Private Equity Fund</option>
+                          <option value="Venture Capital Fund">Venture Capital Fund</option>
+                          <option value="Other">Other</option>
+                        </select>
+                      </div>
+
+                      {/* Field 4: Base Currency */}
+                      <div className="space-y-1.5">
+                        <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Base Currency *</label>
+                        <select 
+                          required
+                          value={newFund.baseCurrency}
+                          onChange={(e) => setNewFund({...newFund, baseCurrency: e.target.value})}
+                          className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2.5 text-white font-mono font-bold focus:border-emerald-500 outline-none"
+                        >
+                          <option value="GHS">GHS — Ghanaian Cedi</option>
+                          <option value="USD">USD — US Dollar</option>
+                          <option value="EUR">EUR — Euro</option>
+                          <option value="GBP">GBP — British Pound</option>
+                          <option value="Other">Other</option>
+                        </select>
+                      </div>
+
+                      {/* Field 5: Initial NAV */}
+                      <div className="space-y-1.5">
+                        <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Initial NAV ({newFund.baseCurrency}) *</label>
+                        <input 
+                          required
+                          type="number"
+                          step="0.000001"
+                          min="0.000001"
+                          value={newFund.nav}
+                          onChange={(e) => setNewFund({...newFund, nav: Number(e.target.value)})}
+                          className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2.5 text-emerald-400 font-mono font-bold focus:border-emerald-500 outline-none"
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* ADVANCED SETUP EXPAND TRIGGER */}
+                  <div className="p-4 bg-slate-950/40 border border-slate-800/80 rounded-2xl flex items-center justify-between">
+                    <div>
+                      <h5 className="text-xs font-bold text-white">Need Regulatory or Service Provider Configuration?</h5>
+                      <p className="text-[11px] text-slate-400 mt-0.5">Switch to full setup mode to add Regulator, Custodian, Administrator & Opening Balances.</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setNewFund(prev => ({ ...prev, setupMode: 'FULL' }))}
+                      className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs rounded-xl transition-all flex items-center gap-1.5 flex-shrink-0"
+                    >
+                      <Sliders className="w-3.5 h-3.5 text-blue-400" />
+                      Expand Full Setup
+                    </button>
+                  </div>
+
+                  {/* BOTTOM ACTION BAR */}
+                  <div className="pt-2 flex items-center justify-end gap-3">
+                    <button 
+                      type="button"
+                      disabled={isProvisioning}
+                      onClick={() => setIsAddModalOpen(false)}
+                      className="px-5 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold rounded-xl transition-all"
+                    >
+                      Cancel
+                    </button>
+                    <button 
+                      type="submit"
+                      disabled={isProvisioning || isCodeDuplicate || !newFund.name.trim() || !newFund.code.trim()}
+                      className="px-7 py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white font-bold rounded-xl transition-all shadow-lg shadow-emerald-600/20 flex items-center gap-2 text-sm"
+                    >
+                      {isProvisioning ? (
                         <>
-                          <Loader2 className="w-5 h-5 animate-spin" />
-                          <span>Analyzing Data Spectrum...</span>
-                        </>
-                      ) : ingestionResult ? (
-                        <>
-                          <Wand2 className="w-5 h-5" />
-                          <span>
-                            {ingestionResult.entities.investors.length} Investors | {ingestionResult.entities.assets.length} Assets Identified
-                          </span>
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                          <span>Provisioning...</span>
                         </>
                       ) : (
                         <>
-                          <Upload className="w-5 h-5" />
-                          <span>Bootstrap from Custodian Export</span>
+                          <CheckCircle2 className="w-4 h-4" />
+                          <span>Create Fund</span>
                         </>
                       )}
-                    </label>
+                    </button>
                   </div>
-                  
-                  {ingestionResult && !isProvisioning && stpLogs.length === 0 && (
-                    <div className="p-3 bg-emerald-500/10 border border-emerald-500/20 rounded-xl space-y-2">
-                      <div className="text-[10px] text-emerald-500 font-bold uppercase tracking-wider flex items-center gap-2">
-                        <div className="w-1 h-1 bg-emerald-500 rounded-full animate-pulse" />
-                         AI Ingestion Engines Active
-                      </div>
+                </form>
+              ) : (
+                /* FULL INSTITUTIONAL FORM CONTENT (2 COLUMNS) */
+                <form onSubmit={handleAddFund} className="flex-1 overflow-y-auto">
+                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 p-6 text-xs">
+                    {/* LEFT COLUMN: 4 SECTION FORM (2/3 WIDTH) */}
+                    <div className="lg:col-span-2 space-y-6">
                       
-                      <div className="grid grid-cols-2 gap-2">
-                        <div className="bg-slate-900/50 p-2 rounded-lg border border-emerald-500/10">
-                          <p className="text-[10px] text-slate-500 uppercase font-bold">Holdings</p>
-                          <p className="text-xs text-white font-mono">{ingestionResult.entities.assets.length} Lines</p>
+                      {/* SECTION 1: FUND IDENTITY */}
+                      <div className="p-5 bg-slate-950/60 border border-slate-800 rounded-2xl space-y-4">
+                        <div className="border-b border-slate-800/80 pb-3">
+                          <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                            <Building2 className="w-4 h-4 text-emerald-400" />
+                            1. Fund Identity
+                          </h4>
+                          <p className="text-[11px] text-slate-400 mt-0.5">Define the fund's core legal and operational identity.</p>
                         </div>
-                        <div className="bg-slate-900/50 p-2 rounded-lg border border-emerald-500/10">
-                          <p className="text-[10px] text-slate-500 uppercase font-bold">Ledger</p>
-                          <p className="text-xs text-white font-mono">{ingestionResult.mappings.investorToFund.length} Subscriptions</p>
-                        </div>
-                      </div>
 
-                      {ingestionResult.entities.investors.length > 0 && (
-                        <div className="pt-2 border-t border-emerald-500/10">
-                          <p className="text-[10px] text-slate-500 uppercase font-bold mb-1">Identified Entities</p>
-                          <div className="flex flex-wrap gap-1">
-                            {ingestionResult.entities.investors.slice(0, 5).map((inv, i) => (
-                              <span key={i} className="text-[9px] bg-slate-900 text-slate-300 px-1.5 py-0.5 rounded border border-slate-800">
-                                {inv.name}
-                              </span>
-                            ))}
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                          <div className="space-y-1.5">
+                            <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Fund Legal Name *</label>
+                            <input 
+                              required
+                              type="text" 
+                              value={newFund.name}
+                              onChange={(e) => setNewFund({...newFund, name: e.target.value})}
+                              placeholder="e.g. Omni Ghana Equity Fund"
+                              className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white font-semibold focus:border-emerald-500 outline-none"
+                            />
+                          </div>
+
+                          <div className="space-y-1.5">
+                            <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Fund Code *</label>
+                            <input 
+                              required
+                              type="text" 
+                              value={newFund.code}
+                              onChange={(e) => setNewFund({...newFund, code: e.target.value.toUpperCase().replace(/\s+/g, '')})}
+                              placeholder="e.g. OGEF"
+                              className={cn(
+                                "w-full bg-slate-900 border rounded-xl px-3.5 py-2.5 text-white font-mono font-bold tracking-wider outline-none",
+                                isCodeDuplicate ? "border-red-500 focus:ring-1 focus:ring-red-500" : "border-slate-800 focus:border-emerald-500"
+                              )}
+                            />
+                            {isCodeDuplicate && (
+                              <p className="text-[10px] text-red-400 font-medium flex items-center gap-1">
+                                <AlertTriangle className="w-3 h-3" /> Fund Code '{newFund.code}' is already in use.
+                              </p>
+                            )}
                           </div>
                         </div>
-                      )}
-                    </div>
-                  )}
 
-                  {(isProvisioning || stpLogs.length > 0) && (
-                    <div className="max-h-40 overflow-y-auto space-y-1 bg-slate-950 p-3 rounded-xl border border-slate-800 font-mono text-[10px]">
-                      <div className="flex items-center gap-2 text-emerald-500 mb-2 border-b border-emerald-500/10 pb-1">
-                        <div className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" />
-                        SYSTEM PROVISIONING LOG
-                      </div>
-                      {stpLogs.map((log, i) => (
-                        <div key={i} className={cn(
-                          "flex items-start gap-2",
-                          log.startsWith('FAILED') ? "text-red-400" : log.startsWith('ERROR') ? "text-amber-400" : "text-slate-400"
-                        )}>
-                          <span className="text-slate-600">[{new Date().toLocaleTimeString()}]</span>
-                          <span>{log}</span>
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                          <div className="space-y-1.5">
+                            <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Fund Type *</label>
+                            <select 
+                              required
+                              value={newFund.fundType}
+                              onChange={(e) => setNewFund({...newFund, fundType: e.target.value})}
+                              className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2.5 text-white font-medium focus:border-emerald-500 outline-none"
+                            >
+                              <option value="Equity Fund">Equity Fund</option>
+                              <option value="Fixed Income Fund">Fixed Income Fund</option>
+                              <option value="Money Market Fund">Money Market Fund</option>
+                              <option value="Balanced Fund">Balanced Fund</option>
+                              <option value="Index Fund">Index Fund</option>
+                              <option value="ETF">ETF (Exchange Traded Fund)</option>
+                              <option value="Real Estate Fund">Real Estate Fund</option>
+                              <option value="Private Equity Fund">Private Equity Fund</option>
+                              <option value="Venture Capital Fund">Venture Capital Fund</option>
+                              <option value="Other">Other</option>
+                            </select>
+                          </div>
+
+                          <div className="space-y-1.5">
+                            <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Fund Structure *</label>
+                            <select 
+                              required
+                              value={newFund.fundStructure}
+                              onChange={(e) => setNewFund({...newFund, fundStructure: e.target.value})}
+                              className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2.5 text-white font-medium focus:border-emerald-500 outline-none"
+                            >
+                              <option value="Open-ended">Open-ended</option>
+                              <option value="Closed-ended">Closed-ended</option>
+                              <option value="Umbrella">Umbrella</option>
+                              <option value="Sub-fund / Compartment">Sub-fund / Compartment</option>
+                            </select>
+                          </div>
+
+                          <div className="space-y-1.5">
+                            <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Base Currency *</label>
+                            <select 
+                              required
+                              value={newFund.baseCurrency}
+                              onChange={(e) => setNewFund({...newFund, baseCurrency: e.target.value})}
+                              className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2.5 text-white font-mono font-bold focus:border-emerald-500 outline-none"
+                            >
+                              <option value="GHS">GHS — Ghanaian Cedi</option>
+                              <option value="USD">USD — US Dollar</option>
+                              <option value="EUR">EUR — Euro</option>
+                              <option value="GBP">GBP — British Pound</option>
+                              <option value="Other">Other Currency</option>
+                            </select>
+                          </div>
                         </div>
-                      ))}
+
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                          <div className="space-y-1.5">
+                            <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Domicile / Jurisdiction *</label>
+                            <select 
+                              required
+                              value={newFund.domicile}
+                              onChange={(e) => setNewFund({...newFund, domicile: e.target.value})}
+                              className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2.5 text-white font-medium focus:border-emerald-500 outline-none"
+                            >
+                              <option value="Ghana">Ghana</option>
+                              <option value="United States">United States</option>
+                              <option value="United Kingdom">United Kingdom</option>
+                              <option value="Luxembourg">Luxembourg</option>
+                              <option value="Ireland">Ireland</option>
+                              <option value="Other">Other Jurisdiction</option>
+                            </select>
+                          </div>
+
+                          <div className="space-y-1.5">
+                            <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Inception Date *</label>
+                            <input 
+                              required
+                              type="date"
+                              value={newFund.inceptionDate}
+                              onChange={(e) => setNewFund({...newFund, inceptionDate: e.target.value})}
+                              className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2.5 text-white font-mono focus:border-emerald-500 outline-none"
+                            />
+                          </div>
+                        </div>
+
+                        {/* Progressive Disclosure for Ticker Symbol */}
+                        {!newFund.showAdvancedIdentity ? (
+                          <button 
+                            type="button"
+                            onClick={() => setNewFund({...newFund, showAdvancedIdentity: true})}
+                            className="text-[11px] text-blue-400 hover:text-blue-300 font-semibold flex items-center gap-1 transition-colors pt-1"
+                          >
+                            + Show Advanced Identity Options (Ticker Symbol)
+                          </button>
+                        ) : (
+                          <div className="space-y-1.5 pt-2 border-t border-slate-800/60">
+                            <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex items-center justify-between">
+                              <span>Ticker Symbol (Optional)</span>
+                              <span className="text-[9px] text-slate-500 font-normal">For publicly traded or exchange-listed funds</span>
+                            </label>
+                            <input 
+                              type="text" 
+                              value={newFund.ticker}
+                              onChange={(e) => setNewFund({...newFund, ticker: e.target.value.toUpperCase()})}
+                              placeholder="e.g. OGEF"
+                              className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3.5 py-2 text-white font-mono"
+                            />
+                          </div>
+                        )}
+
+                        <div className="space-y-1.5">
+                          <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Investment Objective</label>
+                          <textarea 
+                            value={newFund.description}
+                            onChange={(e) => setNewFund({...newFund, description: e.target.value})}
+                            rows={2}
+                            placeholder="Describe investment objective, benchmark index, and asset allocation strategy..."
+                            className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white focus:border-emerald-500 outline-none resize-none"
+                          />
+                        </div>
+                      </div>
+
+                      {/* SECTION 2: REGULATORY & ADMINISTRATION */}
+                      <div className="p-5 bg-slate-950/60 border border-slate-800 rounded-2xl space-y-4">
+                        <div className="border-b border-slate-800/80 pb-3">
+                          <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                            <ShieldCheck className="w-4 h-4 text-blue-400" />
+                            2. Regulatory & Administration
+                          </h4>
+                          <p className="text-[11px] text-slate-400 mt-0.5">Capture regulatory registration and key service-provider relationships.</p>
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                          <div className="space-y-1.5">
+                            <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Regulator</label>
+                            <select 
+                              value={newFund.regulator}
+                              onChange={(e) => setNewFund({...newFund, regulator: e.target.value})}
+                              className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2.5 text-white font-medium focus:border-emerald-500 outline-none"
+                            >
+                              <option value="Securities and Exchange Commission — Ghana">Securities and Exchange Commission — Ghana (SEC)</option>
+                              <option value="Securities and Exchange Commission — US">Securities and Exchange Commission — US (SEC)</option>
+                              <option value="Financial Conduct Authority — UK">Financial Conduct Authority — UK (FCA)</option>
+                              <option value="CSSF — Luxembourg">CSSF — Luxembourg</option>
+                              <option value="Central Bank of Ireland">Central Bank of Ireland</option>
+                              <option value="Other">Other Regulatory Authority</option>
+                            </select>
+                          </div>
+
+                          <div className="space-y-1.5">
+                            <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Registration / Fund Number</label>
+                            <input 
+                              type="text" 
+                              value={newFund.registrationNumber}
+                              onChange={(e) => setNewFund({...newFund, registrationNumber: e.target.value})}
+                              placeholder="e.g. SEC/FUND/2026/04"
+                              className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white font-mono focus:border-emerald-500 outline-none"
+                            />
+                          </div>
+                        </div>
+
+                        {/* Progressive Disclosure for LEI */}
+                        {!newFund.showAdvancedRegulatory ? (
+                          <button 
+                            type="button"
+                            onClick={() => setNewFund({...newFund, showAdvancedRegulatory: true})}
+                            className="text-[11px] text-blue-400 hover:text-blue-300 font-semibold flex items-center gap-1 transition-colors pt-1"
+                          >
+                            + Show Advanced Regulatory Identifiers (LEI)
+                          </button>
+                        ) : (
+                          <div className="space-y-1.5 pt-2 border-t border-slate-800/60">
+                            <div className="flex items-center justify-between">
+                              <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
+                                <span>Legal Entity Identifier (LEI)</span>
+                                <HelpCircle className="w-3.5 h-3.5 text-slate-500" title="Optional global identifier used to uniquely identify legal entities." />
+                              </label>
+                              <span className="text-[9px] text-slate-500">20-Character Standard</span>
+                            </div>
+                            <input 
+                              type="text" 
+                              maxLength={20}
+                              value={newFund.lei}
+                              onChange={(e) => setNewFund({...newFund, lei: e.target.value.toUpperCase().replace(/\s+/g, '')})}
+                              placeholder="20-character Legal Entity Identifier"
+                              className={cn(
+                                "w-full bg-slate-900 border rounded-xl px-3.5 py-2 text-white font-mono tracking-wider outline-none",
+                                isLeiInvalid ? "border-amber-500" : "border-slate-800 focus:border-emerald-500"
+                              )}
+                            />
+                            {isLeiInvalid && (
+                              <p className="text-[10px] text-amber-400">LEI must be exactly 20 characters.</p>
+                            )}
+                          </div>
+                        )}
+
+                        {/* Service Providers Grid */}
+                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 pt-2">
+                          <div className="space-y-1.5">
+                            <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Fund Manager *</label>
+                            <select 
+                              value={newFund.fundManager}
+                              onChange={(e) => setNewFund({...newFund, fundManager: e.target.value})}
+                              className="w-full bg-slate-900 border border-slate-800 rounded-xl px-2.5 py-2 text-white font-medium focus:border-emerald-500 outline-none"
+                            >
+                              <option value="OmniFund Capital Ltd">OmniFund Capital Ltd</option>
+                              <option value="Datagroup Asset Management">Datagroup Asset Management</option>
+                              <option value="IC Asset Managers">IC Asset Managers</option>
+                              <option value="Custom">Custom Fund Manager</option>
+                            </select>
+                          </div>
+
+                          <div className="space-y-1.5">
+                            <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Fund Administrator</label>
+                            <select 
+                              value={newFund.administrator}
+                              onChange={(e) => setNewFund({...newFund, administrator: e.target.value})}
+                              className="w-full bg-slate-900 border border-slate-800 rounded-xl px-2.5 py-2 text-white font-medium focus:border-emerald-500 outline-none"
+                            >
+                              <option value="OmniFund Administration Services">OmniFund Admin Services</option>
+                              <option value="Apex Group">Apex Group</option>
+                              <option value="Citco Fund Services">Citco Fund Services</option>
+                              <option value="State Street Fund Admin">State Street</option>
+                              <option value="Custom">Custom Administrator</option>
+                            </select>
+                          </div>
+
+                          <div className="space-y-1.5">
+                            <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Custodian</label>
+                            <select 
+                              value={newFund.custodian}
+                              onChange={(e) => setNewFund({...newFund, custodian: e.target.value})}
+                              className="w-full bg-slate-900 border border-slate-800 rounded-xl px-2.5 py-2 text-white font-medium focus:border-emerald-500 outline-none"
+                            >
+                              <option value="Standard Chartered Bank Ghana">Standard Chartered</option>
+                              <option value="Stanbic Bank Ghana Custody">Stanbic Bank Custody</option>
+                              <option value="GCB Bank Custody">GCB Bank Custody</option>
+                              <option value="Zenith Bank Custody">Zenith Bank Custody</option>
+                              <option value="Custom">Custom Custodian</option>
+                            </select>
+                          </div>
+
+                          <div className="space-y-1.5">
+                            <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Auditor</label>
+                            <select 
+                              value={newFund.auditor}
+                              onChange={(e) => setNewFund({...newFund, auditor: e.target.value})}
+                              className="w-full bg-slate-900 border border-slate-800 rounded-xl px-2.5 py-2 text-white font-medium focus:border-emerald-500 outline-none"
+                            >
+                              <option value="KPMG Ghana">KPMG Ghana</option>
+                              <option value="PwC Ghana">PwC Ghana</option>
+                              <option value="Deloitte Ghana">Deloitte Ghana</option>
+                              <option value="EY Ghana">EY Ghana</option>
+                              <option value="Custom">Custom Auditor</option>
+                            </select>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* SECTION 3: VALUATION & UNIT SETUP */}
+                      <div className="p-5 bg-slate-950/60 border border-slate-800 rounded-2xl space-y-4">
+                        <div className="border-b border-slate-800/80 pb-3">
+                          <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                            <Scale className="w-4 h-4 text-amber-400" />
+                            3. Valuation & Unit Setup
+                          </h4>
+                          <p className="text-[11px] text-slate-400 mt-0.5">Configure how the fund is valued and establish its opening capitalization.</p>
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                          <div className="space-y-1.5">
+                            <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">NAV Calculation Frequency *</label>
+                            <select 
+                              required
+                              value={newFund.navFrequency}
+                              onChange={(e) => setNewFund({...newFund, navFrequency: e.target.value})}
+                              className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2.5 text-white font-medium focus:border-emerald-500 outline-none"
+                            >
+                              <option value="Daily">Daily</option>
+                              <option value="Weekly">Weekly</option>
+                              <option value="Monthly">Monthly</option>
+                              <option value="Quarterly">Quarterly</option>
+                              <option value="Other">Other Frequency</option>
+                            </select>
+                          </div>
+
+                          <div className="space-y-1.5">
+                            <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Valuation Frequency *</label>
+                            <select 
+                              required
+                              value={newFund.valuationFrequency}
+                              onChange={(e) => setNewFund({...newFund, valuationFrequency: e.target.value})}
+                              className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2.5 text-white font-medium focus:border-emerald-500 outline-none"
+                            >
+                              <option value="Daily">Daily</option>
+                              <option value="Weekly">Weekly</option>
+                              <option value="Monthly">Monthly</option>
+                              <option value="Quarterly">Quarterly</option>
+                              <option value="Other">Other Frequency</option>
+                            </select>
+                          </div>
+                        </div>
+
+                        {/* Progressive Disclosure for Pricing Method */}
+                        {!newFund.showAdvancedValuation ? (
+                          <button 
+                            type="button"
+                            onClick={() => setNewFund({...newFund, showAdvancedValuation: true})}
+                            className="text-[11px] text-blue-400 hover:text-blue-300 font-semibold flex items-center gap-1 transition-colors pt-1"
+                          >
+                            + Show Advanced Valuation Rules (Pricing Method)
+                          </button>
+                        ) : (
+                          <div className="space-y-1.5 pt-2 border-t border-slate-800/60">
+                            <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Pricing Method</label>
+                            <select 
+                              value={newFund.pricingMethod}
+                              onChange={(e) => setNewFund({...newFund, pricingMethod: e.target.value})}
+                              className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-white font-medium focus:border-emerald-500 outline-none"
+                            >
+                              <option value="Forward Pricing">Forward Pricing (Standard)</option>
+                              <option value="Previous NAV">Previous NAV</option>
+                              <option value="Other">Other Valuation Method</option>
+                            </select>
+                          </div>
+                        )}
+
+                        {/* Capitalization Box */}
+                        <div className="p-4 bg-slate-900/90 border border-slate-800 rounded-2xl space-y-4">
+                          <label className="flex items-center gap-2 cursor-pointer">
+                            <input 
+                              type="checkbox"
+                              checked={newFund.initializeZeroBalance}
+                              onChange={(e) => setNewFund({...newFund, initializeZeroBalance: e.target.checked})}
+                              className="w-4 h-4 rounded bg-slate-800 border-slate-700 text-emerald-500 focus:ring-0"
+                            />
+                            <span className="text-xs font-bold text-slate-200">Initialize fund with zero balance (Empty Fund Setup)</span>
+                          </label>
+
+                          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">
+                            <div className="space-y-1.5">
+                              <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">NAV per Unit ({newFund.baseCurrency}) *</label>
+                              <input 
+                                required
+                                type="number"
+                                step="0.000001"
+                                min="0.000001"
+                                value={newFund.nav}
+                                onChange={(e) => setNewFund({...newFund, nav: Number(e.target.value)})}
+                                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-white font-mono font-bold text-sm focus:border-emerald-500 outline-none"
+                              />
+                            </div>
+
+                            <div className="space-y-1.5">
+                              <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Opening Units *</label>
+                              <input 
+                                required
+                                disabled={newFund.initializeZeroBalance}
+                                type="number"
+                                min="0"
+                                step="0.000001"
+                                value={newFund.initializeZeroBalance ? 0 : newFund.totalUnits || ''}
+                                onChange={(e) => setNewFund({...newFund, totalUnits: Number(e.target.value)})}
+                                placeholder="0"
+                                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-white font-mono font-bold text-sm focus:border-emerald-500 outline-none disabled:opacity-50"
+                              />
+                            </div>
+
+                            <div className="space-y-1.5">
+                              <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Opening Net Assets</label>
+                              <div className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-emerald-400 font-mono font-bold text-sm">
+                                {newFund.baseCurrency} {formatCurrency(newFund.aum)}
+                              </div>
+                            </div>
+                          </div>
+
+                          <p className="text-[10px] text-slate-400 italic">
+                            💡 Calculated from Opening Units × NAV per Unit.
+                          </p>
+                        </div>
+                      </div>
+
+                      {/* SECTION 4: DATA IMPORT & INITIALIZATION */}
+                      <div className="p-5 bg-slate-950/60 border border-slate-800 rounded-2xl space-y-4">
+                        <div className="flex items-center justify-between border-b border-slate-800/80 pb-3">
+                          <div>
+                            <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                              <Sparkles className="w-4 h-4 text-blue-400" />
+                              4. Data Import & Initialization
+                            </h4>
+                            <p className="text-[11px] text-slate-400 mt-0.5">Optionally import existing fund data from a custodian, administrator or accounting system.</p>
+                          </div>
+                          <span className="text-[10px] font-mono bg-blue-500/10 text-blue-400 border border-blue-500/20 px-2 py-0.5 rounded-full font-bold">
+                            Optional
+                          </span>
+                        </div>
+
+                        {/* AI / SMART INGESTION CARD */}
+                        <div className="p-4 bg-blue-950/10 border border-blue-500/20 rounded-2xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                          <div className="flex items-start gap-3">
+                            <div className="p-2.5 bg-blue-500/10 border border-blue-500/20 rounded-xl text-blue-400 flex-shrink-0 mt-0.5">
+                              <Sparkles className="w-5 h-5" />
+                            </div>
+                            <div>
+                              <h5 className="text-xs font-bold text-white">Smart Fund Data Import</h5>
+                              <p className="text-[11px] text-slate-400 mt-0.5 max-w-lg">
+                                Upload a custodian, administrator or accounting-system export (CSV, XLSX, PDF) to automatically map and populate fund setup information and opening balances.
+                              </p>
+                            </div>
+                          </div>
+
+                          <div className="flex-shrink-0">
+                            <input 
+                              type="file" 
+                              id="smart-ingestion-input"
+                              className="hidden" 
+                              onChange={handleIngestionFileSelect}
+                              multiple
+                              accept=".csv,.xlsx,.xls,.pdf,.json,.xml"
+                            />
+                            <label 
+                              htmlFor="smart-ingestion-input"
+                              className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs rounded-xl cursor-pointer transition-all shadow-lg shadow-blue-600/20 flex items-center gap-2"
+                            >
+                              {isIngesting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+                              Upload Fund Data
+                            </label>
+                          </div>
+                        </div>
+
+                        {ingestionResult && (
+                          <div className="p-3 bg-emerald-500/10 border border-emerald-500/20 rounded-xl space-y-1">
+                            <div className="text-[10px] text-emerald-400 font-bold uppercase tracking-wider flex items-center gap-2">
+                              <CheckCircle2 className="w-3.5 h-3.5" />
+                              AI Data Extraction Complete: {ingestionResult.entities.investors.length} Investors & {ingestionResult.entities.assets.length} Assets Mapped
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
                     </div>
-                  )}
+
+                    {/* RIGHT COLUMN: STICKY SUMMARY / REVIEW PANEL (1/3 WIDTH) */}
+                    <div className="lg:col-span-1">
+                      <div className="sticky top-0 p-5 bg-slate-950 border border-slate-800 rounded-2xl space-y-4">
+                        <div className="border-b border-slate-800 pb-3 flex items-center justify-between">
+                          <h4 className="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-2">
+                            <FileText className="w-4 h-4 text-emerald-400" />
+                            Fund Setup Summary
+                          </h4>
+                          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                        </div>
+
+                        <div className="space-y-3 font-mono text-[11px]">
+                          <div className="p-2.5 bg-slate-900 border border-slate-800/80 rounded-xl space-y-0.5">
+                            <span className="text-[9px] text-slate-500 uppercase font-sans font-bold">Fund Legal Name</span>
+                            <p className="text-xs font-bold text-white font-sans line-clamp-1">{newFund.name || 'Not configured'}</p>
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-2">
+                            <div className="p-2 bg-slate-900 border border-slate-800/80 rounded-xl space-y-0.5">
+                              <span className="text-[9px] text-slate-500 uppercase font-sans font-bold">Fund Code</span>
+                              <p className="text-xs font-bold text-emerald-400">{newFund.code || 'Not configured'}</p>
+                            </div>
+                            <div className="p-2 bg-slate-900 border border-slate-800/80 rounded-xl space-y-0.5">
+                              <span className="text-[9px] text-slate-500 uppercase font-sans font-bold">Currency</span>
+                              <p className="text-xs font-bold text-white">{newFund.baseCurrency}</p>
+                            </div>
+                          </div>
+
+                          <div className="p-2.5 bg-slate-900 border border-slate-800/80 rounded-xl space-y-0.5">
+                            <span className="text-[9px] text-slate-500 uppercase font-sans font-bold">Fund Type & Structure</span>
+                            <p className="text-xs text-slate-300 font-sans font-semibold">{newFund.fundType} • {newFund.fundStructure}</p>
+                          </div>
+
+                          <div className="p-2.5 bg-slate-900 border border-slate-800/80 rounded-xl space-y-0.5">
+                            <span className="text-[9px] text-slate-500 uppercase font-sans font-bold">Jurisdiction / Regulator</span>
+                            <p className="text-xs text-slate-300 font-sans">{newFund.domicile} ({newFund.regulator.split('—')[0].trim()})</p>
+                          </div>
+
+                          <div className="p-3 bg-emerald-950/20 border border-emerald-500/20 rounded-xl space-y-2">
+                            <div className="flex items-center justify-between text-[10px] text-slate-400">
+                              <span>NAV per Unit:</span>
+                              <span className="text-emerald-400 font-bold">{newFund.baseCurrency} {Number(newFund.nav).toFixed(4)}</span>
+                            </div>
+                            <div className="flex items-center justify-between text-[10px] text-slate-400">
+                              <span>Opening Units:</span>
+                              <span className="text-white font-bold">{Number(newFund.totalUnits).toLocaleString()}</span>
+                            </div>
+                            <div className="flex items-center justify-between pt-1 border-t border-emerald-500/20 text-xs">
+                              <span className="font-bold text-white font-sans">Opening Net Assets:</span>
+                              <span className="font-bold text-emerald-400">{newFund.baseCurrency} {formatCurrency(newFund.aum)}</span>
+                            </div>
+                          </div>
+
+                          <div className="p-2 bg-slate-900 border border-slate-800/80 rounded-xl text-[10px] text-slate-400 flex items-center justify-between font-sans">
+                            <span>NAV Frequency:</span>
+                            <span className="font-bold text-white">{newFund.navFrequency}</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* BOTTOM ACTION BAR */}
+                  <div className="p-5 bg-slate-950 border-t border-slate-800 flex items-center justify-end gap-3 flex-shrink-0">
+                    <button 
+                      type="button"
+                      disabled={isProvisioning}
+                      onClick={() => setIsAddModalOpen(false)}
+                      className="px-5 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold rounded-xl transition-all"
+                    >
+                      Cancel
+                    </button>
+                    <button 
+                      type="submit"
+                      disabled={isProvisioning || isCodeDuplicate || !newFund.name.trim() || !newFund.code.trim()}
+                      className="px-7 py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white font-bold rounded-xl transition-all shadow-lg shadow-emerald-600/20 flex items-center gap-2 text-sm"
+                    >
+                      {isProvisioning ? (
+                        <>
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                          <span>Provisioning Fund...</span>
+                        </>
+                      ) : (
+                        <>
+                          <CheckCircle2 className="w-4 h-4" />
+                          <span>Create Fund</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </form>
+              )}
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Share Class Setup Modal */}
+      <AnimatePresence>
+        {showShareClassModal && createdFundConfirmation && (
+          <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-md">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="relative w-full max-w-lg bg-slate-900 border border-slate-800 rounded-3xl p-6 shadow-2xl space-y-5"
+            >
+              <div className="flex items-center justify-between border-b border-slate-800 pb-4">
+                <div className="flex items-center gap-3">
+                  <div className="p-2.5 bg-emerald-500/10 border border-emerald-500/20 rounded-2xl text-emerald-400">
+                    <Layers className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="text-lg font-bold text-white">Add Share Class</h3>
+                    <p className="text-xs text-slate-400">{createdFundConfirmation.name} ({createdFundConfirmation.code || createdFundConfirmation.ticker})</p>
+                  </div>
+                </div>
+                <button onClick={() => setShowShareClassModal(false)} className="p-2 hover:bg-slate-800 rounded-xl text-slate-400">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <form onSubmit={async (e) => {
+                e.preventDefault();
+                try {
+                  const newShareClass = {
+                    id: `SC-${Date.now()}`,
+                    ...shareClassForm
+                  };
+                  const currentClasses = createdFundConfirmation.shareClasses || [];
+                  const updatedClasses = [...currentClasses, newShareClass];
+                  await updateDoc(doc(db, 'accounts', createdFundConfirmation.id), {
+                    shareClasses: updatedClasses
+                  });
+                  setCreatedFundConfirmation({
+                    ...createdFundConfirmation,
+                    shareClasses: updatedClasses
+                  });
+                  toast.success(`Share Class '${shareClassForm.name}' added successfully!`);
+                  setShowShareClassModal(false);
+                } catch (err) {
+                  handleFirestoreError(err, OperationType.WRITE, 'accounts');
+                }
+              }} className="space-y-4 text-xs">
+                <div className="space-y-1.5">
+                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Share Class Name *</label>
+                  <input 
+                    required
+                    type="text" 
+                    value={shareClassForm.name}
+                    onChange={(e) => setShareClassForm({...shareClassForm, name: e.target.value})}
+                    placeholder="e.g. Class A (Retail) Accumulation"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white font-semibold outline-none focus:border-emerald-500"
+                  />
                 </div>
 
-                <div className="flex gap-4 pt-4">
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Investor Type *</label>
+                    <select 
+                      value={shareClassForm.type}
+                      onChange={(e) => setShareClassForm({...shareClassForm, type: e.target.value})}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-white outline-none focus:border-emerald-500"
+                    >
+                      <option value="Retail">Retail</option>
+                      <option value="Institutional">Institutional</option>
+                      <option value="HNWI">High Net Worth (HNWI)</option>
+                      <option value="Founders">Founders / Seed Class</option>
+                    </select>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Share Class Currency *</label>
+                    <select 
+                      value={shareClassForm.currency}
+                      onChange={(e) => setShareClassForm({...shareClassForm, currency: e.target.value})}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-white font-mono font-bold outline-none focus:border-emerald-500"
+                    >
+                      <option value="GHS">GHS — Ghanaian Cedi</option>
+                      <option value="USD">USD — US Dollar</option>
+                      <option value="EUR">EUR — Euro</option>
+                      <option value="GBP">GBP — British Pound</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Initial Share Class NAV *</label>
+                  <input 
+                    required
+                    type="number" 
+                    step="0.000001"
+                    value={shareClassForm.nav}
+                    onChange={(e) => setShareClassForm({...shareClassForm, nav: Number(e.target.value)})}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-emerald-400 font-mono font-bold text-sm outline-none focus:border-emerald-500"
+                  />
+                </div>
+
+                <div className="pt-3 flex gap-3">
                   <button 
-                    type="button"
-                    disabled={isProvisioning}
-                    onClick={() => setIsAddModalOpen(false)}
-                    className="flex-1 py-3 px-4 bg-slate-800 hover:bg-slate-700 text-white font-semibold rounded-xl transition-all"
+                    type="button" 
+                    onClick={() => setShowShareClassModal(false)}
+                    className="flex-1 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold rounded-xl"
                   >
                     Cancel
                   </button>
                   <button 
-                    type="submit"
-                    disabled={isIngesting || isProvisioning}
-                    className="flex-1 py-3 px-4 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold rounded-xl transition-all shadow-lg shadow-emerald-600/20 flex items-center justify-center gap-2"
+                    type="submit" 
+                    className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl shadow-lg shadow-emerald-600/20"
                   >
-                    {isProvisioning ? (
-                      <>
-                        <Loader2 className="w-5 h-5 animate-spin" />
-                        Provisioning...
-                      </>
-                    ) : (
-                      <>
-                        <CheckCircle2 className="w-5 h-5" />
-                        Create & Provision
-                      </>
-                    )}
+                    Save Share Class
                   </button>
                 </div>
               </form>
@@ -1318,61 +2197,77 @@ export default function AccountManagement({ accounts, investors, portfolio, tran
               </div>
 
               <h3 className="text-2xl font-bold text-white mb-2">
-                {accountToDelete ? "Delete Account?" : `Delete ${selectedAccountIds.size} Accounts?`}
+                {accountToDelete ? "Delete Fund?" : `Delete ${selectedAccountIds.size} Funds?`}
               </h3>
-              <p className="text-slate-400 mb-6">
+              <p className="text-slate-400 text-sm mb-6">
                 {accountToDelete 
-                  ? "This action is permanent and will delete all associated assets, investors, and transaction history for this account."
-                  : `This action is permanent and will delete all assets, investors, and transaction history for these ${selectedAccountIds.size} accounts.`
+                  ? "This action is permanent and will delete all associated assets, investors, valuations, and transaction history for this fund."
+                  : `This action is permanent and will delete all assets, investors, valuations, and transaction history for these ${selectedAccountIds.size} funds.`
                 }
               </p>
 
-              <div className="space-y-4 mb-8">
-                <div className="space-y-2">
-                  <label className="text-sm font-medium text-slate-400 flex items-center gap-2">
-                    <Lock className="w-4 h-4" />
-                    Enter Admin PIN to Authorize
-                  </label>
-                  <input 
-                    type="password" 
-                    maxLength={4}
-                    value={pinInput}
-                    onChange={(e) => {
-                      setPinInput(e.target.value);
+              <form onSubmit={(e) => { e.preventDefault(); handleDeleteAccount(); }}>
+                <div className="space-y-4 mb-8">
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium text-slate-400 flex items-center justify-between">
+                      <span className="flex items-center gap-2">
+                        <Lock className="w-4 h-4 text-amber-400" />
+                        Enter Admin PIN to Authorize
+                      </span>
+                      <span className="text-xs font-mono text-slate-500">PIN: 1234</span>
+                    </label>
+                    <input 
+                      type="password" 
+                      maxLength={4}
+                      value={pinInput}
+                      onChange={(e) => {
+                        setPinInput(e.target.value);
+                        setPinError(false);
+                      }}
+                      className={cn(
+                        "w-full bg-slate-800 border rounded-xl px-4 py-3 text-white text-center text-2xl tracking-[1em] focus:ring-2 outline-none transition-all font-mono",
+                        pinError ? "border-red-500 focus:ring-red-500" : "border-slate-700 focus:ring-emerald-500"
+                      )}
+                      placeholder="****"
+                      autoFocus
+                    />
+                    {pinError && (
+                      <p className="text-red-400 text-xs font-semibold flex items-center gap-1">
+                        <AlertTriangle className="w-3.5 h-3.5" /> Incorrect PIN. Enter default Admin PIN (1234).
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex gap-4">
+                  <button 
+                    type="button"
+                    onClick={() => {
+                      setIsDeleteModalOpen(false);
+                      setAccountToDelete(null);
+                      setPinInput("");
                       setPinError(false);
                     }}
-                    className={cn(
-                      "w-full bg-slate-800 border rounded-xl px-4 py-3 text-white text-center text-2xl tracking-[1em] focus:ring-2 outline-none transition-all",
-                      pinError ? "border-red-500 focus:ring-red-500" : "border-slate-700 focus:ring-emerald-500"
+                    className="flex-1 py-3 px-4 bg-slate-800 hover:bg-slate-700 text-white font-semibold rounded-xl transition-all text-sm"
+                  >
+                    Cancel
+                  </button>
+                  <button 
+                    type="submit"
+                    disabled={isDeleting || pinInput.length < 4}
+                    className="flex-1 py-3 px-4 bg-red-600 hover:bg-red-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold rounded-xl transition-all shadow-lg shadow-red-600/20 text-sm flex items-center justify-center gap-2"
+                  >
+                    {isDeleting ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        Deleting...
+                      </>
+                    ) : (
+                      "Confirm Delete"
                     )}
-                    placeholder="****"
-                  />
-                  {pinError && (
-                    <p className="text-red-500 text-xs font-medium">Incorrect PIN. Please try again.</p>
-                  )}
+                  </button>
                 </div>
-              </div>
-
-              <div className="flex gap-4">
-                <button 
-                  onClick={() => {
-                    setIsDeleteModalOpen(false);
-                    setAccountToDelete(null);
-                    setPinInput("");
-                    setPinError(false);
-                  }}
-                  className="flex-1 py-3 px-4 bg-slate-800 hover:bg-slate-700 text-white font-semibold rounded-xl transition-all"
-                >
-                  Cancel
-                </button>
-                <button 
-                  onClick={handleDeleteAccount}
-                  disabled={isDeleting || pinInput.length < 4}
-                  className="flex-1 py-3 px-4 bg-red-600 hover:bg-red-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold rounded-xl transition-all shadow-lg shadow-red-600/20"
-                >
-                  {isDeleting ? "Deleting..." : "Confirm Delete"}
-                </button>
-              </div>
+              </form>
             </motion.div>
           </div>
         )}

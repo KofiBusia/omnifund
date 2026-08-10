@@ -20,6 +20,7 @@ import { collection, doc, increment, runTransaction, getDocs, query, where } fro
 import { handleFirestoreError, OperationType, cn, formatCurrency, safeFormatDate } from '../lib/utils';
 import { processTransactionDocument, ExtractedTransaction } from '../services/geminiService';
 import { calculateSmartNavForDate, SmartNavResult } from '../services/smartNavEngine';
+import { downloadTransactionRegistryTemplate } from '../services/csvTemplateService';
 
 interface BulkTransactionModalProps {
   isOpen: boolean;
@@ -100,20 +101,7 @@ export default function BulkTransactionModal({ isOpen, onClose, investors, accou
   }, [bulkDate, selectedAccountId, useCustomNav, valuations, accounts, selectedAccount, portfolio]);
 
   const downloadTemplate = () => {
-    const headers = ['name', 'type', 'amount', 'email', 'phone'];
-    const sampleRows = [
-      ['John Doe', 'BUY', '5000', 'john@example.com', '0244123456'],
-      ['Jane Smith', 'SELL', '1000', '', ''],
-      ['New Investor', 'BUY', '2500', 'new@investor.com', '0555987654']
-    ];
-    const csvContent = [headers, ...sampleRows].map(row => row.join(',')).join('\n');
-    const blob = new Blob([csvContent], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'bulk_fund_transactions.csv';
-    a.click();
-    URL.revokeObjectURL(url);
+    downloadTransactionRegistryTemplate();
   };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {

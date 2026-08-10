@@ -32,9 +32,12 @@ import {
   Filter,
   Trash2,
   Sparkles,
-  CalendarX
+  CalendarX,
+  KeyRound
 } from 'lucide-react';
 import { calculateSmartNavForDate, SmartNavResult } from '../services/smartNavEngine';
+import { calculateSubscription, calculateRedemption, roundMoney, roundUnits, roundNav } from '../services/fundAccountingEngine';
+import { approveInvestorAndEnablePortal, resendPortalInvitation } from '../services/investorProvisioningService';
 import { motion, AnimatePresence } from 'motion/react';
 import { addDoc, collection, serverTimestamp, doc, updateDoc, deleteDoc, increment, runTransaction, writeBatch, query, where, getDocs } from 'firebase/firestore';
 import { db } from '../firebase';
@@ -52,6 +55,7 @@ import EmailInvestorModal from './EmailInvestorModal';
 import BulkEmailModal from './BulkEmailModal';
 import BulkStatementModal from './BulkStatementModal';
 import MembershipCertificateModal from './MembershipCertificateModal';
+import InvestorBulkUploadModal from './InvestorBulkUploadModal';
 import { 
   AreaChart, 
   Area, 
@@ -148,6 +152,7 @@ export default function InvestorManagement({
   const [isMerging, setIsMerging] = useState(false);
   
   const [isBatchDeleteModalOpen, setIsBatchDeleteModalOpen] = useState(false);
+  const [isInvestorBulkUploadOpen, setIsInvestorBulkUploadOpen] = useState(false);
 
   const july21Transactions = useMemo(() => {
     return transactions.filter(isJuly21Transaction);
@@ -611,26 +616,49 @@ export default function InvestorManagement({
         const investorRef = doc(db, 'investors', selectedInvestor.id);
         
         let unitsToChange = 0;
-        let amountToChange = 0;
+        let cashToChange = 0;
+        let costBasisDelta = 0;
+        let costBasisReduction = 0;
+        let realizedGainLoss = 0;
+        let totalAmount = 0;
 
         if (transaction.type === 'BUY') {
-          unitsToChange = transaction.amount / currentNav;
-          amountToChange = transaction.amount;
+          const sub = calculateSubscription(
+            transaction.amount,
+            currentNav,
+            selectedInvestor.unitsOwned,
+            selectedInvestor.totalInvestment
+          );
+          unitsToChange = sub.unitsIssued;
+          cashToChange = sub.grossAmount;
+          costBasisDelta = sub.grossAmount;
+          totalAmount = sub.grossAmount;
         } else {
-          unitsToChange = -transaction.units;
-          amountToChange = transaction.units * currentNav;
+          const red = calculateRedemption(
+            transaction.units,
+            selectedInvestor.unitsOwned,
+            selectedInvestor.totalInvestment,
+            currentNav
+          );
+          unitsToChange = -red.unitsRedeemed;
+          cashToChange = -red.grossProceeds;
+          costBasisDelta = -red.costBasisReduction;
+          costBasisReduction = red.costBasisReduction;
+          realizedGainLoss = red.realizedGainLoss;
+          totalAmount = red.grossProceeds;
         }
 
         // 1. Update investor
         dbTransaction.update(investorRef, {
           unitsOwned: increment(unitsToChange),
-          totalInvestment: increment(transaction.type === 'BUY' ? amountToChange : -amountToChange)
+          totalInvestment: increment(costBasisDelta),
+          ...(realizedGainLoss !== 0 ? { realizedGainLoss: increment(realizedGainLoss) } : {})
         });
 
         // 2. Update account total units and cash balance
         dbTransaction.update(accountRef, {
           totalUnits: increment(unitsToChange),
-          cashBalance: increment(transaction.type === 'BUY' ? amountToChange : -amountToChange)
+          cashBalance: increment(cashToChange)
         });
 
         // 3. Record transaction
@@ -641,13 +669,15 @@ export default function InvestorManagement({
           type: transaction.type,
           units: Math.abs(unitsToChange),
           pricePerUnit: currentNav,
-          totalAmount: amountToChange,
+          totalAmount,
+          costBasisReduction,
+          realizedGainLoss,
           timestamp: new Date(transaction.timestamp).toISOString()
         });
       });
 
       setIsTransactionModalOpen(false);
-      setTransaction({ type: 'BUY', amount: 0, units: 0, timestamp: new Date().toISOString().split('T')[0] });
+      setTransaction({ type: 'BUY', amount: 0, units: 0, timestamp: new Date().toISOString().split('T')[0], useCustomNav: false, manualNav: 1.0000 });
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, 'transactions');
     }
@@ -964,6 +994,14 @@ export default function InvestorManagement({
               )}
             </button>
             <button 
+              onClick={() => setIsInvestorBulkUploadOpen(true)}
+              className="bg-emerald-600/10 hover:bg-emerald-600/20 text-emerald-400 border border-emerald-500/30 px-4 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2 transition-all shadow-lg shadow-emerald-500/10"
+              title="Bulk import investors and stage subscription transactions"
+            >
+              <Upload className="w-4 h-4" />
+              <span>Bulk Upload Investors</span>
+            </button>
+            <button 
               onClick={() => {
                 setNewInvestor(prev => ({
                   ...prev,
@@ -1130,6 +1168,21 @@ export default function InvestorManagement({
                               <Award className="w-2.5 h-2.5" /> Certified
                             </span>
                           )}
+                          {investor.portalStatus === 'ACTIVATED' && (
+                            <span className="bg-emerald-500/10 text-emerald-400 text-[10px] px-1.5 py-0.5 rounded-full border border-emerald-500/20 font-bold">
+                              🟢 Portal Active
+                            </span>
+                          )}
+                          {investor.portalStatus === 'INVITED' && (
+                            <span className="bg-blue-500/10 text-blue-400 text-[10px] px-1.5 py-0.5 rounded-full border border-blue-500/20 font-bold">
+                              ⚡ Invited
+                            </span>
+                          )}
+                          {investor.portalStatus === 'DISABLED' && (
+                            <span className="bg-red-500/10 text-red-400 text-[10px] px-1.5 py-0.5 rounded-full border border-red-500/20 font-bold">
+                              🔒 Disabled
+                            </span>
+                          )}
                         </p>
                         <p className="text-xs text-slate-500">
                           {investor.email || 'No email'} {investor.phone ? `• ${investor.phone}` : ''}
@@ -1262,6 +1315,25 @@ export default function InvestorManagement({
                           <ShieldCheck className="w-5 h-5" />
                         </button>
                       )}
+                      <button 
+                        onClick={async () => {
+                          try {
+                            if (investor.portalStatus === 'ACTIVATED' || investor.portalStatus === 'INVITED') {
+                              await resendPortalInvitation(investor.id, 'ADMIN');
+                              toast.success(`Resent activation invitation link to ${investor.email}`);
+                            } else {
+                              await approveInvestorAndEnablePortal(investor.id, 'ADMIN', true);
+                              toast.success(`Approved investor & sent portal activation link to ${investor.email}`);
+                            }
+                          } catch (err: any) {
+                            toast.error("Portal provisioning error: " + (err?.message || "Check logs"));
+                          }
+                        }}
+                        className="p-2 hover:bg-slate-700 rounded-lg text-slate-400 hover:text-emerald-400 transition-colors" 
+                        title={investor.portalStatus === 'ACTIVATED' ? "Resend Portal Invitation" : "Approve & Enable Investor Portal"}
+                      >
+                        <KeyRound className="w-5 h-5 text-emerald-400" />
+                      </button>
                       <button 
                         onClick={() => {
                           setSelectedInvestorForEmail(investor);
@@ -2422,6 +2494,15 @@ export default function InvestorManagement({
         accounts={accounts}
         investors={investors}
         initialAccountId={selectedAccountId}
+      />
+
+      {/* Investor Bulk Upload Modal */}
+      <InvestorBulkUploadModal 
+        isOpen={isInvestorBulkUploadOpen}
+        onClose={() => setIsInvestorBulkUploadOpen(false)}
+        investors={investors}
+        accounts={accounts}
+        valuations={valuations}
       />
     </div>
   );

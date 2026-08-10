@@ -1,8 +1,225 @@
 import { collection, getDocs, doc, getDoc, updateDoc, addDoc, serverTimestamp, query, where, deleteDoc, increment } from 'firebase/firestore';
 import { db } from '../firebase';
 import { fetchGSEPrices } from '../lib/gemini';
-import { Asset, InvestmentAccount, Valuation } from '../types';
+import { 
+  Asset, 
+  InvestmentAccount, 
+  Valuation, 
+  PriceStatus, 
+  ValuationException, 
+  ValuationNavBridge, 
+  ValuationRun, 
+  FeeAccrualConfig,
+  Investor
+} from '../types';
 import { handleFirestoreError, OperationType } from '../lib/utils';
+import { calculateNetAssets, calculateNavPerUnit, roundMoney, roundNav } from './fundAccountingEngine';
+
+// Default Fee Configuration: 1.50% Management Fee, 0.25% Custody Fee p.a.
+export const DEFAULT_FEE_CONFIG: FeeAccrualConfig = {
+  managementFeeRatePct: 1.50,
+  custodyFeeRatePct: 0.25,
+  adminFeeRatePct: 0.10
+};
+
+/**
+ * Asset Price Status & Stale Price Detection Engine
+ * Evaluates pricing freshness and assigns PriceStatus flags.
+ */
+export interface AssetPriceStatusDetail {
+  assetId: string;
+  ticker: string;
+  name: string;
+  currentPrice: number;
+  marketValue: number;
+  status: PriceStatus;
+  daysStale: number;
+  warningMessage?: string;
+}
+
+export function resolveAssetPriceStatuses(
+  assets: Asset[],
+  staleThresholdDays: number = 7,
+  targetDateStr: string = new Date().toISOString()
+): AssetPriceStatusDetail[] {
+  const targetTime = new Date(targetDateStr).getTime();
+
+  return assets.map(asset => {
+    const priceDate = asset.valuationDate ? new Date(asset.valuationDate).getTime() : 0;
+    const diffMs = priceDate > 0 ? Math.max(0, targetTime - priceDate) : Infinity;
+    const daysStale = diffMs === Infinity ? 999 : Math.floor(diffMs / (1000 * 60 * 60 * 24));
+
+    let status: PriceStatus = 'PRICED';
+    let warningMessage: string | undefined = undefined;
+
+    if (!asset.currentPrice || asset.currentPrice <= 0) {
+      status = 'MISSING';
+      warningMessage = `No valuation price recorded for ${asset.ticker}`;
+    } else if (daysStale > staleThresholdDays) {
+      status = 'STALE';
+      warningMessage = `Price date (${asset.valuationDate?.split('T')[0] || 'Unknown'}) is ${daysStale} days old (exceeds ${staleThresholdDays}-day threshold)`;
+    } else if (asset.recordedAt && asset.recordedAt === asset.valuationDate) {
+      status = 'MANUAL';
+    }
+
+    return {
+      assetId: asset.id,
+      ticker: asset.ticker,
+      name: asset.name,
+      currentPrice: asset.currentPrice,
+      marketValue: asset.marketValue,
+      status,
+      daysStale: daysStale === 999 ? 0 : daysStale,
+      warningMessage
+    };
+  });
+}
+
+/**
+ * Daily Expense & Fee Accruals Engine
+ * Computes daily accruals for fund management, custody, and operating fees.
+ */
+export function calculateDailyFeeAccruals(
+  netAssets: number,
+  feeConfig: FeeAccrualConfig = DEFAULT_FEE_CONFIG
+): {
+  dailyManagementFee: number;
+  dailyCustodyFee: number;
+  dailyAdminFee: number;
+  totalDailyAccrual: number;
+} {
+  const safeNetAssets = Math.max(0, netAssets || 0);
+
+  const dailyManagementFee = roundMoney((safeNetAssets * (feeConfig.managementFeeRatePct / 100)) / 365);
+  const dailyCustodyFee = roundMoney((safeNetAssets * (feeConfig.custodyFeeRatePct / 100)) / 365);
+  const dailyAdminFee = roundMoney((safeNetAssets * (feeConfig.adminFeeRatePct / 100)) / 365);
+  const totalDailyAccrual = roundMoney(dailyManagementFee + dailyCustodyFee + dailyAdminFee);
+
+  return {
+    dailyManagementFee,
+    dailyCustodyFee,
+    dailyAdminFee,
+    totalDailyAccrual
+  };
+}
+
+/**
+ * Valuation Exception & Anomaly Detector
+ */
+export function detectValuationExceptions(
+  account: InvestmentAccount,
+  assets: Asset[],
+  investors: Investor[],
+  previousNav: number = 1.0000,
+  currentCalculatedNav: number = 1.0000
+): ValuationException[] {
+  const exceptions: ValuationException[] = [];
+
+  // 1. Missing & Stale Asset Prices
+  const priceStatuses = resolveAssetPriceStatuses(assets);
+  priceStatuses.forEach(ps => {
+    if (ps.status === 'MISSING') {
+      exceptions.push({
+        id: `EXC-PRICE-MISSING-${ps.ticker}-${Date.now()}`,
+        code: 'MISSING_PRICE',
+        severity: 'CRITICAL',
+        description: `Missing valuation price for asset ${ps.ticker} (${ps.name}).`,
+        item: ps.ticker,
+        recommendedAction: 'Input official market closing price or approved valuation price before final publishing.',
+        status: 'OPEN'
+      });
+    } else if (ps.status === 'STALE') {
+      exceptions.push({
+        id: `EXC-PRICE-STALE-${ps.ticker}-${Date.now()}`,
+        code: 'STALE_PRICE',
+        severity: 'WARNING',
+        description: ps.warningMessage || `Stale price for asset ${ps.ticker}.`,
+        item: ps.ticker,
+        recommendedAction: 'Refresh pricing from stock exchange or pricing source.',
+        status: 'OPEN'
+      });
+    }
+  });
+
+  // 2. Negative Cash Check
+  if ((account.cashBalance || 0) < 0) {
+    exceptions.push({
+      id: `EXC-CASH-NEG-${Date.now()}`,
+      code: 'NEGATIVE_CASH',
+      severity: 'CRITICAL',
+      description: `Fund cash balance is negative (${roundMoney(account.cashBalance || 0).toLocaleString()} GHS).`,
+      item: 'Fund Cash Account',
+      recommendedAction: 'Inject capital or reconcile cash ledger before publishing NAV.',
+      status: 'OPEN'
+    });
+  }
+
+  // 3. Unit Reconciliation Mismatch
+  const accountInvestors = investors.filter(i => i.accountId === account.id);
+  const totalInvestorUnits = accountInvestors.reduce((sum, i) => sum + (i.unitsOwned || 0), 0);
+  const fundUnits = account.totalUnits || 0;
+  if (Math.abs(totalInvestorUnits - fundUnits) > 0.0001) {
+    exceptions.push({
+      id: `EXC-UNITS-MISMATCH-${Date.now()}`,
+      code: 'UNIT_MISMATCH',
+      severity: 'CRITICAL',
+      description: `Unit balance mismatch: Sum of investor units (${totalInvestorUnits.toLocaleString()}) != Fund total units (${fundUnits.toLocaleString()}).`,
+      item: 'Unit Ledger',
+      recommendedAction: 'Run unit ledger reconciliation to align investor unit registry with fund master units.',
+      status: 'OPEN'
+    });
+  }
+
+  // 4. Large NAV Movement Anomaly Detection (>10% shift)
+  if (previousNav > 0 && currentCalculatedNav > 0) {
+    const pctChange = Math.abs((currentCalculatedNav - previousNav) / previousNav) * 100;
+    if (pctChange > 10.0) {
+      exceptions.push({
+        id: `EXC-NAV-SHIFT-${Date.now()}`,
+        code: 'LARGE_NAV_MOVEMENT',
+        severity: 'WARNING',
+        description: `Unusually large NAV movement: NAV changed by ${pctChange.toFixed(2)}% (from GH₵${previousNav.toFixed(4)} to GH₵${currentCalculatedNav.toFixed(4)}).`,
+        item: 'NAV Per Unit',
+        recommendedAction: 'Verify asset valuations and transactions for material anomalies before publishing.',
+        status: 'OPEN'
+      });
+    }
+  }
+
+  return exceptions;
+}
+
+/**
+ * NAV Bridge Decomposition Engine
+ * Breaks down movement from Previous NAV to Closing NAV.
+ */
+export function calculateNavBridge(
+  previousNav: number,
+  closingNav: number,
+  portfolioGainValue: number,
+  realizedGainValue: number,
+  accruedFeesValue: number,
+  netCashFlowValue: number,
+  unitsOutstanding: number
+): ValuationNavBridge {
+  const safeUnits = Math.max(1, unitsOutstanding || 1);
+
+  const portfolioImpact = roundNav(portfolioGainValue / safeUnits);
+  const realizedGainImpact = roundNav(realizedGainValue / safeUnits);
+  const expenseImpact = roundNav(-Math.abs(accruedFeesValue) / safeUnits);
+  const incomeImpact = 0; // Derived if explicit income is logged
+  const netCashFlowImpact = roundNav(netCashFlowValue / safeUnits);
+
+  return {
+    previousNav: roundNav(previousNav),
+    portfolioMovement: portfolioImpact,
+    realizedGainMovement: realizedGainImpact,
+    incomeMovement: incomeImpact,
+    expenseMovement: expenseImpact,
+    netCashFlowMovement: netCashFlowImpact,
+    closingNav: roundNav(closingNav)
+  };
+}
 
 export const runGlobalValuation = async () => {
   try {
@@ -31,14 +248,14 @@ export const runGlobalValuation = async () => {
     
     for (const asset of allAssets) {
       const newPrice = (prices[asset.ticker] && prices[asset.ticker] > 0) ? prices[asset.ticker] : asset.currentPrice;
-      const newMarketValue = asset.quantity * newPrice;
+      const newMarketValue = roundMoney(asset.quantity * newPrice);
       const totalCostBasis = asset.totalCostBasis || (asset.quantity * asset.costBasis);
       
       await updateDoc(doc(db, 'portfolio', asset.id), {
         currentPrice: newPrice,
         marketValue: newMarketValue,
         valuationDate: new Date().toISOString(),
-        unrealizedGainLoss: newMarketValue - totalCostBasis
+        unrealizedGainLoss: roundMoney(newMarketValue - totalCostBasis)
       });
 
       if (asset.accountId) {
@@ -54,14 +271,20 @@ export const runGlobalValuation = async () => {
       const actualTotalUnits = invSnap.docs.reduce((sum, d) => sum + (d.data().unitsOwned || 0), 0) || account.totalUnits || 0;
 
       const totalHoldingsValue = accountTotals[account.id] || 0;
-      const totalMarketValue = totalHoldingsValue + (account.cashBalance || 0);
-      let calculatedNAV = actualTotalUnits > 0 ? totalMarketValue / actualTotalUnits : account.nav;
+      const { netAssets } = calculateNetAssets(
+        totalHoldingsValue,
+        account.cashBalance || 0,
+        account.receivables || 0,
+        account.liabilities || 0,
+        account.accruedFees || 0
+      );
 
+      let calculatedNAV = calculateNavPerUnit(netAssets, actualTotalUnits, account.nav);
       if (totalHoldingsValue === 0 && (account.cashBalance || 0) <= 0 && account.nav > 0) {
         calculatedNAV = account.nav;
       }
 
-      const totalAum = actualTotalUnits > 0 ? actualTotalUnits * calculatedNAV : totalMarketValue;
+      const totalAum = netAssets;
 
       try {
         await updateDoc(doc(db, 'accounts', account.id), {
@@ -403,7 +626,14 @@ export const recalculateAccountValuation = async (accountId: string) => {
 
     const totalHoldingsValue = allAssets.reduce((sum, a) => sum + (a.marketValue || 0), 0);
     const manualAdj = account.manualNavAdjustment || 0;
-    const totalMarketValue = totalHoldingsValue + (account.cashBalance || 0) + manualAdj;
+
+    const { netAssets } = calculateNetAssets(
+      totalHoldingsValue + manualAdj,
+      account.cashBalance || 0,
+      account.receivables || 0,
+      account.liabilities || 0,
+      account.accruedFees || 0
+    );
     
     // Check total investor units
     const invQuery = query(collection(db, 'investors'), where('accountId', '==', accountId));
@@ -413,9 +643,9 @@ export const recalculateAccountValuation = async (accountId: string) => {
     const isManual = (account as any).lastValuationMethod === 'manual' || (account as any).isManualNav === true;
     const calculatedNAV = isManual && account.nav > 0 
       ? account.nav 
-      : (actualTotalUnits > 0 ? totalMarketValue / actualTotalUnits : account.nav);
+      : calculateNavPerUnit(netAssets, actualTotalUnits, account.nav);
 
-    const calculatedAum = actualTotalUnits > 0 ? actualTotalUnits * calculatedNAV : totalMarketValue;
+    const calculatedAum = netAssets;
 
     await updateDoc(accountRef, {
       aum: calculatedAum,
@@ -651,6 +881,108 @@ export const reconcileAccountCash = async (accountId: string, amount: number) =>
     });
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, 'reconcile_cash');
+    throw error;
+  }
+};
+
+/**
+ * Executes a Formal Valuation Run (`VAL-YYYY-MM-DD-001`)
+ * Generates an auditable, reproducible ValuationRun snapshot.
+ */
+export const executeFormalValuationRun = async (
+  accountId: string,
+  valuationDateStr: string = new Date().toISOString().split('T')[0],
+  preparedBy: string = 'System Admin',
+  feeConfig: FeeAccrualConfig = DEFAULT_FEE_CONFIG,
+  manualGain: number = 0,
+  notes?: string
+): Promise<ValuationRun> => {
+  try {
+    const accountRef = doc(db, 'accounts', accountId);
+    const accountSnap = await getDoc(accountRef);
+    if (!accountSnap.exists()) throw new Error(`Account ${accountId} not found`);
+    const account = { id: accountSnap.id, ...accountSnap.data() } as InvestmentAccount;
+
+    // Fetch Assets
+    const assetsSnap = await getDocs(query(collection(db, 'portfolio'), where('accountId', '==', accountId)));
+    const assets = assetsSnap.docs.map(d => ({ id: d.id, ...d.data() } as Asset));
+
+    // Fetch Investors
+    const invSnap = await getDocs(query(collection(db, 'investors'), where('accountId', '==', accountId)));
+    const investors = invSnap.docs.map(d => ({ id: d.id, ...d.data() } as Investor));
+    const totalUnits = investors.reduce((sum, i) => sum + (i.unitsOwned || 0), 0) || account.totalUnits || 0;
+
+    const portfolioValue = roundMoney(assets.reduce((sum, a) => sum + (a.marketValue || 0), 0) + manualGain);
+    const cashBalance = roundMoney(account.cashBalance || 0);
+    const receivables = roundMoney(account.receivables || 0);
+    const operatingLiabilities = roundMoney(account.liabilities || 0);
+
+    // Calculate Net Assets before daily fee accrual
+    const grossNetAssets = portfolioValue + cashBalance + receivables - operatingLiabilities;
+
+    // Calculate Daily Fee Accrual
+    const feeAccruals = calculateDailyFeeAccruals(grossNetAssets, feeConfig);
+    const accruedFees = roundMoney((account.accruedFees || 0) + feeAccruals.totalDailyAccrual);
+
+    const { totalAssets, totalLiabilities, netAssets } = calculateNetAssets(
+      portfolioValue,
+      cashBalance,
+      receivables,
+      operatingLiabilities,
+      accruedFees
+    );
+
+    const calculatedNav = calculateNavPerUnit(netAssets, totalUnits, account.nav || 1.0000);
+
+    // Detect Valuation Exceptions & Anomalies
+    const exceptions = detectValuationExceptions(account, assets, investors, account.nav || 1.0000, calculatedNav);
+
+    // Calculate NAV Bridge
+    const navBridge = calculateNavBridge(
+      account.nav || 1.0000,
+      calculatedNav,
+      portfolioValue - assets.reduce((sum, a) => sum + (a.totalCostBasis || 0), 0),
+      0,
+      feeAccruals.totalDailyAccrual,
+      0,
+      totalUnits
+    );
+
+    const runNumber = `VAL-${valuationDateStr}-${Math.floor(100 + Math.random() * 900)}`;
+
+    const runData: ValuationRun = {
+      id: runNumber,
+      valuationNumber: runNumber,
+      accountId: account.id,
+      valuationDate: valuationDateStr,
+      runTimestamp: new Date().toISOString(),
+      status: exceptions.some(e => e.severity === 'CRITICAL') ? 'REVIEW' : 'DRAFT',
+      portfolioValue,
+      cashBalance,
+      receivables,
+      totalAssets,
+      operatingLiabilities,
+      accruedFees,
+      totalLiabilities,
+      netAssets,
+      unitsOutstanding: totalUnits,
+      navPerUnit: calculatedNav,
+      navBridge,
+      exceptions,
+      preparedBy,
+      notes: notes || `Valuation Run ${runNumber}`
+    };
+
+    // Save to valuation_runs collection
+    await addDoc(collection(db, 'valuation_runs'), {
+      ...runData,
+      createdAt: serverTimestamp()
+    });
+
+    return runData;
+  } catch (error) {
+    console.error('Failed to execute formal valuation run:', error);
+    handleFirestoreError(error, OperationType.WRITE, 'formal_valuation_run');
     throw error;
   }
 };

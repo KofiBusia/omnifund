@@ -26,7 +26,8 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   ShieldCheck,
-  Headphones
+  Headphones,
+  ArrowLeftRight
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
@@ -65,12 +66,15 @@ import Dashboard from './components/Dashboard';
 import AccountManagement from './components/AccountManagement';
 import InvestorManagement from './components/InvestorManagement';
 import PortfolioManagement from './components/PortfolioManagement';
+import TransactionModule from './components/TransactionModule';
 import ValuationEngine from './components/ValuationEngine';
 import GeminiAssistant from './components/GeminiAssistant';
 import StatementModule from './components/StatementModule';
 import AnalyticsSuite from './components/AnalyticsSuite';
 import IngestionEngineUI from './components/IngestionEngineUI';
 import GlobalSearch from './components/GlobalSearch';
+import ActivationScreen from './components/ActivationScreen';
+import InvestorPortal from './components/InvestorPortal';
 import LoginPage from './components/LoginPage';
 import UserSettingsPanel from './components/UserSettingsPanel';
 import StaffManagement from './components/StaffManagement';
@@ -323,6 +327,7 @@ export default function App() {
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, roles: ['superadmin', 'admin', 'staff', 'support', 'investor'] },
     { id: 'accounts', label: 'Accounts', icon: PieChart, roles: ['superadmin', 'admin', 'staff'] },
     { id: 'investors', label: 'Investors', icon: Users, roles: ['superadmin', 'admin', 'staff', 'support'] },
+    { id: 'transactions', label: 'Transactions', icon: ArrowLeftRight, roles: ['superadmin', 'admin', 'staff', 'support'] },
     { id: 'portfolio', label: 'Portfolio', icon: Briefcase, roles: ['superadmin', 'admin', 'staff', 'investor'] },
     { id: 'analytics', label: 'Analytics', icon: Activity, roles: ['superadmin', 'admin', 'staff', 'investor'] },
     { id: 'ingestion', label: 'Ingestion', icon: Cpu, roles: ['superadmin', 'admin', 'staff'] },
@@ -336,6 +341,37 @@ export default function App() {
   const filteredNavItems = navItems.filter(item => item.roles.includes(role || ''));
 
   const isDark = theme === 'dark';
+
+  // Activation Link Handler
+  const hasActivationToken = typeof window !== 'undefined' && window.location.search.includes('token=');
+  if (hasActivationToken) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-white">
+        <Toaster position="top-right" theme="dark" richColors />
+        <ActivationScreen onActivated={() => {
+          if (typeof window !== 'undefined') window.location.href = '/';
+        }} />
+      </div>
+    );
+  }
+
+  // Dedicated Investor Portal for Investor Role
+  if (role === 'investor' && user) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-white p-6">
+        <Toaster position="top-right" theme="dark" richColors />
+        <InvestorPortal 
+          user={user}
+          investors={investors}
+          accounts={accounts}
+          portfolio={portfolio}
+          transactions={transactions}
+          valuations={valuations}
+          onLogout={handleLogout}
+        />
+      </div>
+    );
+  }
 
   return (
     <div className={cn("min-h-screen flex transition-colors duration-200", isDark ? "bg-slate-950 text-slate-200" : "bg-slate-100 text-slate-900")}>
@@ -580,6 +616,15 @@ export default function App() {
                   valuations={valuations}
                   portfolio={portfolio}
                   initialSearchTerm={globalSearchTerm}
+                />
+              )}
+              {activeTab === 'transactions' && (
+                <TransactionModule 
+                  transactions={transactions} 
+                  accounts={accounts} 
+                  investors={investors} 
+                  valuations={valuations}
+                  role={role}
                 />
               )}
               {activeTab === 'portfolio' && (

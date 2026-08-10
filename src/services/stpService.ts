@@ -141,6 +141,7 @@ export class STPService {
 
             transaction.update(doc(db, 'accounts', fund.id), {
               totalUnits: increment(unitsToIssue),
+              cashBalance: increment(totalDeposit),
               aum: increment(totalDeposit),
               lastSyncDate: serverTimestamp()
             });

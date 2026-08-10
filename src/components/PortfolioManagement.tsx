@@ -23,13 +23,18 @@ import {
   History,
   RotateCcw,
   FileText,
-  Download
+  Download,
+  MinusCircle,
+  Building2,
+  Activity,
+  CheckCircle2
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { addDoc, collection, doc, updateDoc, deleteDoc, runTransaction, increment, query, where, getDocs, orderBy, serverTimestamp } from 'firebase/firestore';
 import { db } from '../firebase';
 import { handleFirestoreError, OperationType } from '../lib/utils';
 import { runGlobalValuation, revertAssetValuation, recalculateAccountValuation } from '../services/valuationService';
+import { calculateAssetDisposal, calculateNetAssets, calculateNavPerUnit, roundMoney } from '../services/fundAccountingEngine';
 import { AssetValuation } from '../types';
 import { generatePortfolioStatementPDF } from '../lib/pdfGenerator';
 
@@ -106,44 +111,132 @@ export default function PortfolioManagement({ portfolio, fund, accounts, role }:
   const liveValuation = useMemo(() => {
     if (!activeFund) return { aum: 0, nav: 1 };
     const totalMarketValue = filteredPortfolio.reduce((sum, asset) => sum + asset.marketValue, 0);
-    const calculatedAUM = totalMarketValue + (activeFund.cashBalance || 0);
-    const calculatedNAV = activeFund.totalUnits > 0 ? calculatedAUM / activeFund.totalUnits : activeFund.nav;
+    const { netAssets } = calculateNetAssets(
+      totalMarketValue,
+      activeFund.cashBalance || 0,
+      activeFund.receivables || 0,
+      activeFund.liabilities || 0,
+      activeFund.accruedFees || 0
+    );
+    const calculatedNAV = calculateNavPerUnit(netAssets, activeFund.totalUnits, activeFund.nav);
     
     return {
-      aum: calculatedAUM,
+      aum: netAssets,
       nav: calculatedNAV
     };
   }, [filteredPortfolio, activeFund]);
 
+  const [isSellModalOpen, setIsSellModalOpen] = useState(false);
+  const [sellingAsset, setSellingAsset] = useState<Asset | null>(null);
+  const [sellForm, setSellForm] = useState({
+    quantitySold: 0,
+    salePrice: 0
+  });
+  const [isSelling, setIsSelling] = useState(false);
+
+  const handleSellAsset = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!sellingAsset || isSelling) return;
+
+    setIsSelling(true);
+    const loadingToast = toast.loading(`Processing sale of ${sellingAsset.ticker}...`);
+
+    try {
+      const disposal = calculateAssetDisposal(
+        sellForm.quantitySold,
+        sellForm.salePrice,
+        sellingAsset.quantity,
+        sellingAsset.costBasis
+      );
+
+      await runTransaction(db, async (transaction) => {
+        const assetRef = doc(db, 'portfolio', sellingAsset.id);
+        const accountRef = doc(db, 'accounts', sellingAsset.accountId || localAccountId || '');
+
+        if (disposal.remainingQuantity <= 0) {
+          transaction.delete(assetRef);
+        } else {
+          transaction.update(assetRef, {
+            quantity: disposal.remainingQuantity,
+            marketValue: disposal.remainingMarketValue,
+            valuationDate: new Date().toISOString(),
+            unrealizedGainLoss: roundMoney(disposal.remainingMarketValue - (disposal.remainingQuantity * sellingAsset.costBasis)),
+            realizedGainLoss: increment(disposal.realizedGainLoss)
+          });
+        }
+
+        // Credit fund cash balance with sale proceeds
+        transaction.update(accountRef, {
+          cashBalance: increment(disposal.saleProceeds)
+        });
+      });
+
+      toast.success(`Sold ${disposal.quantitySold} ${sellingAsset.ticker} @ GH₵${disposal.salePrice}. Proceeds: GH₵${disposal.saleProceeds.toLocaleString()} (Realized ${disposal.realizedGainLoss >= 0 ? 'Gain' : 'Loss'}: GH₵${Math.abs(disposal.realizedGainLoss).toLocaleString()})`, { id: loadingToast });
+
+      if (sellingAsset.accountId) {
+        await recalculateAccountValuation(sellingAsset.accountId);
+      }
+
+      setIsSellModalOpen(false);
+      setSellingAsset(null);
+      setSellForm({ quantitySold: 0, salePrice: 0 });
+    } catch (error: any) {
+      console.error("Sell Asset Error:", error);
+      toast.error(`Failed to process asset sale: ${error.message}`, { id: loadingToast });
+    } finally {
+      setIsSelling(false);
+    }
+  };
+
   const [newAsset, setNewAsset] = useState({ 
     ticker: '', 
     name: '', 
-    sector: 'Banking',
+    sector: 'Telecoms / Tech',
     quantity: 0, 
-    costBasis: 0, // Avg per share
-    totalCostBasis: 0,
+    tradePrice: 0,
+    tradeConsideration: 0,
+    tradeLevies: 0,
+    brokerCommission: 0,
+    costBasis: 0, // Effective all-in cost per share
+    totalCostBasis: 0, // Net Settlement Value
     currentPrice: 0,
     marketValue: 0,
     recordedAt: new Date().toISOString().split('T')[0],
-    accountId: localAccountId || ''
+    accountId: localAccountId || '',
+    brokerName: 'Merban Stockbrokers Ltd',
+    csdNumber: 'UMBBBXX-Y020260303TYT4-0001',
+    clientAccountNo: '1004967',
+    contractNoteRef: ''
   });
 
-  // Auto-calculate logic
-  const handleFinancialChange = (field: string, value: number) => {
+  // Auto-calculate Contract Note Settlement & All-In Unit Cost
+  const handleContractNoteChange = (field: string, value: any) => {
     setNewAsset(prev => {
       const updated = { ...prev, [field]: value };
-      
-      if (field === 'quantity' || field === 'costBasis') {
-        updated.totalCostBasis = updated.quantity * updated.costBasis;
-      } else if (field === 'totalCostBasis' && updated.quantity > 0) {
-        updated.costBasis = updated.totalCostBasis / updated.quantity;
+      const qty = Number(updated.quantity) || 0;
+      const tPrice = Number(updated.tradePrice) || 0;
+      const tLevies = Number(updated.tradeLevies) || 0;
+      const bComm = Number(updated.brokerCommission) || 0;
+
+      // 1. Calculate Gross Trade Consideration
+      const consideration = roundMoney(qty * tPrice);
+      updated.tradeConsideration = consideration;
+
+      // 2. Calculate Net Settlement Value (Total Cost Basis) = Consideration + Levies + Commission
+      const netSettlement = roundMoney(consideration + tLevies + bComm);
+      updated.totalCostBasis = netSettlement > 0 ? netSettlement : (Number(updated.totalCostBasis) || 0);
+
+      // 3. Calculate Effective All-In Cost Per Share
+      updated.costBasis = qty > 0 ? Number((updated.totalCostBasis / qty).toFixed(4)) : tPrice;
+
+      // 4. Default Current Price to Trade Price if 0
+      if (field === 'tradePrice' && (!updated.currentPrice || updated.currentPrice === 0)) {
+        updated.currentPrice = tPrice;
       }
 
-      if (field === 'quantity' || field === 'currentPrice') {
-        updated.marketValue = updated.quantity * updated.currentPrice;
-      } else if (field === 'marketValue' && updated.quantity > 0) {
-        updated.currentPrice = updated.marketValue / updated.quantity;
-      }
+      // 5. Calculate Market Value
+      const cPrice = Number(updated.currentPrice) || tPrice;
+      updated.marketValue = roundMoney(qty * cPrice);
 
       return updated;
     });
@@ -362,7 +455,8 @@ export default function PortfolioManagement({ portfolio, fund, accounts, role }:
         const accountRef = doc(db, 'accounts', modalSelectedAccount.id);
         const assetRef = doc(collection(db, 'portfolio'));
         
-        const marketValue = newAsset.marketValue || (newAsset.quantity * newAsset.currentPrice);
+        const marketValue = newAsset.marketValue || (newAsset.quantity * (newAsset.currentPrice || newAsset.tradePrice));
+        const totalCost = newAsset.totalCostBasis || (newAsset.quantity * newAsset.costBasis) || newAsset.tradeConsideration;
         
         transaction.set(assetRef, {
           accountId: modalSelectedAccount.id,
@@ -370,13 +464,21 @@ export default function PortfolioManagement({ portfolio, fund, accounts, role }:
           name: newAsset.name.trim(),
           sector: newAsset.sector,
           quantity: Number(newAsset.quantity),
-          costBasis: Number(newAsset.costBasis),
+          tradePrice: Number(newAsset.tradePrice || newAsset.costBasis),
+          tradeConsideration: Number(newAsset.tradeConsideration || (newAsset.quantity * newAsset.tradePrice)),
+          tradeLevies: Number(newAsset.tradeLevies || 0),
+          brokerCommission: Number(newAsset.brokerCommission || 0),
+          costBasis: Number(newAsset.costBasis || (totalCost / newAsset.quantity)),
           totalCostBasis: Number(totalCost),
-          currentPrice: Number(newAsset.currentPrice),
+          currentPrice: Number(newAsset.currentPrice || newAsset.tradePrice),
           marketValue: Number(marketValue),
           valuationDate: new Date().toISOString(),
           recordedAt: newAsset.recordedAt || new Date().toISOString().split('T')[0],
-          unrealizedGainLoss: Number(marketValue - totalCost)
+          unrealizedGainLoss: Number(marketValue - totalCost),
+          brokerName: newAsset.brokerName || 'Merban Stockbrokers Ltd',
+          csdNumber: newAsset.csdNumber || '',
+          clientAccountNo: newAsset.clientAccountNo || '',
+          contractNoteRef: newAsset.contractNoteRef || ''
         });
 
         // 2. Deduct from cash balance
@@ -642,6 +744,17 @@ export default function PortfolioManagement({ portfolio, fund, accounts, role }:
                     {role === 'admin' && (
                       <div className="flex items-center justify-end gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
                         <button 
+                          onClick={() => {
+                            setSellingAsset(asset);
+                            setSellForm({ quantitySold: asset.quantity, salePrice: asset.currentPrice });
+                            setIsSellModalOpen(true);
+                          }}
+                          className="p-2 hover:bg-amber-500/10 rounded-lg text-slate-400 hover:text-amber-400 transition-colors"
+                          title="Sell / Dispose Asset Position"
+                        >
+                          <MinusCircle className="w-5 h-5" />
+                        </button>
+                        <button 
                           onClick={() => handleViewHistory(asset)}
                           className="p-2 hover:bg-slate-700 rounded-lg text-slate-400 hover:text-emerald-500 transition-colors"
                           title="View Valuation History"
@@ -691,188 +804,342 @@ export default function PortfolioManagement({ portfolio, fund, accounts, role }:
         )}
       </div>
 
-      {/* Add Asset Modal */}
+      {/* Redesigned Asset Adding Modal — Broker Contract Note Standard */}
       <AnimatePresence>
         {isAddModalOpen && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-            <motion.div 
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              onClick={() => setIsAddModalOpen(false)}
-              className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm"
-            />
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-md">
             <motion.div 
               initial={{ opacity: 0, scale: 0.95, y: 20 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.95, y: 20 }}
-              className="relative w-full max-w-lg bg-slate-900 border border-slate-800 rounded-3xl p-8 shadow-2xl"
+              className="relative w-full max-w-4xl bg-slate-900 border border-slate-800 rounded-3xl overflow-hidden shadow-2xl max-h-[92vh] flex flex-col"
             >
-              <h3 className="text-2xl font-bold text-white mb-6">Add Portfolio Asset</h3>
-              <form onSubmit={handleAddAsset} className="space-y-6">
-                <div className="space-y-2">
-                  <label className="text-sm font-medium text-slate-400">Investment Account</label>
-                  <select 
-                    required
-                    value={newAsset.accountId}
-                    onChange={(e) => setNewAsset({...newAsset, accountId: e.target.value})}
-                    className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
-                  >
-                    {accounts.map(acc => (
-                      <option key={acc.id} value={acc.id}>{acc.name} ({acc.ticker})</option>
-                    ))}
-                  </select>
-                  {modalSelectedAccount && modalSelectedAccount.cashBalance < (newAsset.totalCostBasis || (newAsset.quantity * newAsset.costBasis)) && (
-                    <div className="bg-amber-500/10 border border-amber-500/20 p-3 rounded-lg flex items-center gap-2 text-amber-500 text-xs font-bold">
-                      <AlertCircle className="w-4 h-4" />
-                      Warning: Insufficient Cash (Available: {formatCurrency(modalSelectedAccount.cashBalance)})
-                    </div>
-                  )}
-                </div>
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium text-slate-400">Ticker Symbol</label>
-                    <input 
-                      required
-                      type="text" 
-                      value={newAsset.ticker}
-                      onChange={(e) => setNewAsset({...newAsset, ticker: e.target.value.toUpperCase()})}
-                      className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
-                      placeholder="e.g. MTNGH"
-                    />
+              {/* Header */}
+              <div className="p-6 bg-gradient-to-r from-emerald-950/40 via-slate-900 to-slate-900 border-b border-slate-800 flex items-center justify-between flex-shrink-0">
+                <div className="flex items-center gap-3">
+                  <div className="p-3 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400">
+                    <FileText className="w-6 h-6" />
                   </div>
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium text-slate-400">Asset Name</label>
-                    <input 
-                      required
-                      type="text" 
-                      value={newAsset.name}
-                      onChange={(e) => setNewAsset({...newAsset, name: e.target.value})}
-                      className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
-                      placeholder="e.g. MTN Ghana"
-                    />
-                  </div>
-                </div>
-                <div className="space-y-2">
-                  <label className="text-sm font-medium text-slate-400">Sector</label>
-                  <select 
-                    required
-                    value={newAsset.sector}
-                    onChange={(e) => setNewAsset({...newAsset, sector: e.target.value})}
-                    className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
-                  >
-                    <option value="Banking">Banking</option>
-                    <option value="Mining">Mining</option>
-                    <option value="Tech">Tech</option>
-                    <option value="Energy">Energy</option>
-                    <option value="Consumer">Consumer</option>
-                    <option value="Cash">Cash</option>
-                    <option value="Other">Other</option>
-                  </select>
-                </div>
-                <div className="space-y-2">
-                  <label className="text-sm font-medium text-slate-400">Quantity</label>
-                  <input 
-                    required
-                    type="number" 
-                    value={newAsset.quantity}
-                    onChange={(e) => setNewAsset({...newAsset, quantity: Number(e.target.value)})}
-                    className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
-                    placeholder="0"
-                  />
-                </div>
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium text-slate-400 uppercase tracking-wider text-[10px]">Avg Per Share (GH₵)</label>
-                    <input 
-                      type="number" 
-                      step="0.000001"
-                      value={newAsset.costBasis || ''}
-                      onChange={(e) => handleFinancialChange('costBasis', Number(e.target.value))}
-                      className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
-                      placeholder="0.0000"
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium text-slate-400 uppercase tracking-wider text-[10px]">Total Cost Basis (GH₵)</label>
-                    <input 
-                      type="number" 
-                      step="0.01"
-                      value={newAsset.totalCostBasis || ''}
-                      onChange={(e) => handleFinancialChange('totalCostBasis', Number(e.target.value))}
-                      className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
-                      placeholder="0.00"
-                    />
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium text-slate-400 uppercase tracking-wider text-[10px]">Current Price (GH₵)</label>
-                    <input 
-                      type="number" 
-                      step="0.000001"
-                      value={newAsset.currentPrice || ''}
-                      onChange={(e) => handleFinancialChange('currentPrice', Number(e.target.value))}
-                      className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
-                      placeholder="0.0000"
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium text-slate-400 uppercase tracking-wider text-[10px]">Market Value (GH₵)</label>
-                    <input 
-                      type="number" 
-                      step="0.01"
-                      value={newAsset.marketValue || ''}
-                      onChange={(e) => handleFinancialChange('marketValue', Number(e.target.value))}
-                      className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all font-bold text-emerald-400"
-                      placeholder="0.00"
-                    />
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium text-slate-400 uppercase tracking-wider text-[10px]">Unrealized Gain/Loss</label>
-                    <div className={cn(
-                      "w-full bg-slate-800/50 border border-slate-700/50 rounded-xl px-4 py-3 text-sm font-bold flex items-center",
-                      (newAsset.marketValue - newAsset.totalCostBasis) >= 0 ? "text-emerald-500" : "text-red-500"
-                    )}>
-                      {formatCurrency(newAsset.marketValue - newAsset.totalCostBasis)}
-                      <span className="ml-auto text-[10px] opacity-70">
-                        {newAsset.totalCostBasis > 0 ? ((newAsset.marketValue - newAsset.totalCostBasis) / newAsset.totalCostBasis * 100).toFixed(2) : '0.00'}%
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h3 className="text-xl font-bold text-white">Record Equity Investment & Contract Note</h3>
+                      <span className="text-[10px] font-mono bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded-full font-bold">
+                        GSE Broker Contract Note Standard
                       </span>
                     </div>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      Ingest trade consideration, GSE/SEC levies, and broker commissions matching official broker contract notes
+                    </p>
                   </div>
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium text-slate-400 uppercase tracking-wider text-[10px]">Acquisition Date</label>
-                    <div className="relative">
-                      <Calendar className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+                </div>
+                <button 
+                  onClick={() => setIsAddModalOpen(false)}
+                  className="text-slate-400 hover:text-white p-2 rounded-xl hover:bg-slate-800 transition-colors"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <form onSubmit={handleAddAsset} className="p-6 overflow-y-auto space-y-6 flex-1 text-xs">
+                {/* Cash Availability Banner */}
+                {modalSelectedAccount && (
+                  <div className={cn(
+                    "p-4 rounded-2xl border flex items-center justify-between transition-all",
+                    modalSelectedAccount.cashBalance < (newAsset.totalCostBasis || 0)
+                      ? "bg-red-500/10 border-red-500/30 text-red-400"
+                      : "bg-slate-950/80 border-slate-800 text-slate-300"
+                  )}>
+                    <div className="flex items-center gap-2.5">
+                      <DollarSign className="w-4 h-4 text-emerald-400" />
+                      <div>
+                        <span className="text-[10px] uppercase font-bold text-slate-500 block">Target Fund Cash Balance</span>
+                        <strong className="text-sm font-bold text-white font-mono">{formatCurrency(modalSelectedAccount.cashBalance)}</strong>
+                      </div>
+                    </div>
+                    {modalSelectedAccount.cashBalance < (newAsset.totalCostBasis || 0) && (
+                      <span className="text-xs font-bold text-red-400 flex items-center gap-1 bg-red-500/20 px-3 py-1 rounded-full border border-red-500/30">
+                        <AlertCircle className="w-3.5 h-3.5" /> Insufficient Available Cash
+                      </span>
+                    )}
+                  </div>
+                )}
+
+                {/* Section 1: Broker & Custody Reference */}
+                <div className="p-4 bg-slate-950/60 border border-slate-800 rounded-2xl space-y-4">
+                  <div className="flex items-center justify-between border-b border-slate-800/80 pb-2">
+                    <span className="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-1.5">
+                      <Building2 className="w-3.5 h-3.5 text-blue-400" />
+                      1. Broker & Custody Reference
+                    </span>
+                    <span className="text-[10px] text-slate-500">e.g. Merban Stockbrokers Ltd Note</span>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Target Fund Account</label>
+                      <select 
+                        required
+                        value={newAsset.accountId}
+                        onChange={(e) => setNewAsset({...newAsset, accountId: e.target.value})}
+                        className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-white focus:border-emerald-500 outline-none"
+                      >
+                        {accounts.map(acc => (
+                          <option key={acc.id} value={acc.id}>{acc.name} ({acc.ticker})</option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Broker Name</label>
+                      <select 
+                        value={newAsset.brokerName}
+                        onChange={(e) => setNewAsset({...newAsset, brokerName: e.target.value})}
+                        className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-white focus:border-emerald-500 outline-none font-medium"
+                      >
+                        <option value="Merban Stockbrokers Ltd">Merban Stockbrokers Ltd</option>
+                        <option value="IC Securities Ltd">IC Securities Ltd</option>
+                        <option value="Databank Brokerage Ltd">Databank Brokerage Ltd</option>
+                        <option value="UMB Capital Ltd">UMB Capital Ltd</option>
+                        <option value="EDC Stockbrokers">EDC Stockbrokers</option>
+                        <option value="Black Star Brokerage">Black Star Brokerage</option>
+                        <option value="Other Licensed Broker">Other Licensed Broker</option>
+                      </select>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">CSD Account No.</label>
+                      <input 
+                        type="text"
+                        value={newAsset.csdNumber}
+                        onChange={(e) => setNewAsset({...newAsset, csdNumber: e.target.value})}
+                        placeholder="e.g. UMBBBXX-Y020260303TYT4-0001"
+                        className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-white focus:border-emerald-500 outline-none font-mono text-[11px]"
+                      />
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Trade / Settlement Date</label>
                       <input 
                         required
-                        type="date" 
+                        type="date"
                         value={newAsset.recordedAt}
                         onChange={(e) => setNewAsset({...newAsset, recordedAt: e.target.value})}
-                        className="w-full bg-slate-800 border border-slate-700 rounded-xl pl-11 pr-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
+                        className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-white focus:border-emerald-500 outline-none font-mono"
                       />
                     </div>
                   </div>
                 </div>
-                <div className="flex gap-4 pt-4">
+
+                {/* Section 2: Equity / Asset Identification */}
+                <div className="p-4 bg-slate-950/60 border border-slate-800 rounded-2xl space-y-4">
+                  <div className="flex items-center justify-between border-b border-slate-800/80 pb-2">
+                    <span className="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-1.5">
+                      <Briefcase className="w-3.5 h-3.5 text-teal-400" />
+                      2. Equity Asset Details
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Ticker Symbol</label>
+                      <input 
+                        required
+                        type="text" 
+                        value={newAsset.ticker}
+                        onChange={(e) => setNewAsset({...newAsset, ticker: e.target.value.toUpperCase()})}
+                        placeholder="e.g. MTNGH"
+                        className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm font-bold text-white focus:border-emerald-500 outline-none font-mono tracking-wider"
+                      />
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Name of Equity / Asset</label>
+                      <input 
+                        required
+                        type="text" 
+                        value={newAsset.name}
+                        onChange={(e) => setNewAsset({...newAsset, name: e.target.value})}
+                        placeholder="e.g. Scancom PLC (MTN Ghana)"
+                        className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm font-semibold text-white focus:border-emerald-500 outline-none"
+                      />
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Sector / Asset Class</label>
+                      <select 
+                        required
+                        value={newAsset.sector}
+                        onChange={(e) => setNewAsset({...newAsset, sector: e.target.value})}
+                        className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-white focus:border-emerald-500 outline-none font-medium"
+                      >
+                        <option value="Telecoms / Tech">Telecoms / Tech</option>
+                        <option value="Banking">Banking</option>
+                        <option value="Mining">Mining</option>
+                        <option value="Energy">Energy</option>
+                        <option value="Consumer Goods">Consumer Goods</option>
+                        <option value="Fixed Income / Treasury">Fixed Income / Treasury</option>
+                        <option value="Cash & Equivalents">Cash & Equivalents</option>
+                        <option value="Other">Other</option>
+                      </select>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Section 3: Contract Note Financial Execution & Fees */}
+                <div className="p-4 bg-slate-950/60 border border-slate-800 rounded-2xl space-y-4">
+                  <div className="flex items-center justify-between border-b border-slate-800/80 pb-2">
+                    <span className="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-1.5">
+                      <Activity className="w-3.5 h-3.5 text-amber-400" />
+                      3. Trade Execution & Charges Breakdown
+                    </span>
+                    <span className="text-[10px] text-amber-400 font-mono">Auto-Calculating Settlement</span>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">No. of Shares (Qty)</label>
+                      <input 
+                        required
+                        type="number"
+                        min="1"
+                        value={newAsset.quantity || ''}
+                        onChange={(e) => handleContractNoteChange('quantity', Number(e.target.value))}
+                        placeholder="e.g. 449"
+                        className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-white font-mono font-bold text-sm focus:border-emerald-500 outline-none"
+                      />
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Trade Price (GH₵)</label>
+                      <input 
+                        required
+                        type="number"
+                        step="0.0001"
+                        value={newAsset.tradePrice || ''}
+                        onChange={(e) => handleContractNoteChange('tradePrice', Number(e.target.value))}
+                        placeholder="e.g. 6.60"
+                        className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-white font-mono text-sm focus:border-emerald-500 outline-none"
+                      />
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Trade Consideration</label>
+                      <div className="w-full bg-slate-900/90 border border-slate-800 rounded-xl px-3 py-2 text-slate-200 font-mono font-bold">
+                        {formatCurrency(newAsset.tradeConsideration || (newAsset.quantity * newAsset.tradePrice))}
+                      </div>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Trade Levies (GH₵)</label>
+                      <input 
+                        type="number"
+                        step="0.01"
+                        value={newAsset.tradeLevies || ''}
+                        onChange={(e) => handleContractNoteChange('tradeLevies', Number(e.target.value))}
+                        placeholder="e.g. 20.74"
+                        className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-amber-400 font-mono text-sm focus:border-emerald-500 outline-none"
+                      />
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Broker Commission (GH₵)</label>
+                      <input 
+                        type="number"
+                        step="0.01"
+                        value={newAsset.brokerCommission || ''}
+                        onChange={(e) => handleContractNoteChange('brokerCommission', Number(e.target.value))}
+                        placeholder="e.g. 53.34"
+                        className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-amber-400 font-mono text-sm focus:border-emerald-500 outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Contract Note Receipt Calculation Box */}
+                  <div className="p-4 bg-slate-900/90 border border-slate-800 rounded-xl space-y-2">
+                    <div className="flex items-center justify-between text-slate-400 text-[11px] pb-1 border-b border-slate-800/60 font-mono">
+                      <span>Trade Consideration ({newAsset.quantity} shares @ GH₵{newAsset.tradePrice})</span>
+                      <span className="text-slate-200 font-bold">{formatCurrency(newAsset.tradeConsideration)}</span>
+                    </div>
+                    <div className="flex items-center justify-between text-slate-400 text-[11px] pb-1 border-b border-slate-800/60 font-mono">
+                      <span>+ GSE / SEC / CSD Trade Levies</span>
+                      <span className="text-amber-400">+ {formatCurrency(newAsset.tradeLevies)}</span>
+                    </div>
+                    <div className="flex items-center justify-between text-slate-400 text-[11px] pb-1 border-b border-slate-800/60 font-mono">
+                      <span>+ Broker Commission Fee</span>
+                      <span className="text-amber-400">+ {formatCurrency(newAsset.brokerCommission)}</span>
+                    </div>
+                    <div className="flex items-center justify-between pt-1">
+                      <div>
+                        <span className="text-xs font-bold text-white uppercase tracking-wider block">Net Settlement Value (Total Cost Basis)</span>
+                        <span className="text-[10px] text-emerald-400 font-mono">
+                          Effective All-In Cost / Share: GH₵{newAsset.costBasis?.toFixed(4)}
+                        </span>
+                      </div>
+                      <span className="text-lg font-bold text-emerald-400 font-mono">{formatCurrency(newAsset.totalCostBasis)}</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Section 4: Current Valuation & Price Updates */}
+                <div className="p-4 bg-slate-950/60 border border-slate-800 rounded-2xl space-y-4">
+                  <div className="flex items-center justify-between border-b border-slate-800/80 pb-2">
+                    <span className="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-1.5">
+                      <TrendingUp className="w-3.5 h-3.5 text-emerald-400" />
+                      4. Current Valuation & Performance
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Current Price per Share (GH₵)</label>
+                      <input 
+                        type="number"
+                        step="0.0001"
+                        value={newAsset.currentPrice || ''}
+                        onChange={(e) => handleContractNoteChange('currentPrice', Number(e.target.value))}
+                        placeholder="e.g. 6.80"
+                        className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-white font-mono text-sm focus:border-emerald-500 outline-none"
+                      />
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Current Market Value (GH₵)</label>
+                      <div className="w-full bg-slate-900/90 border border-slate-800 rounded-xl px-3 py-2 text-emerald-400 font-mono font-bold text-sm">
+                        {formatCurrency(newAsset.marketValue)}
+                      </div>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Unrealized Gain / Loss</label>
+                      <div className={cn(
+                        "w-full bg-slate-900/90 border border-slate-800 rounded-xl px-3 py-2 font-mono font-bold text-sm flex items-center justify-between",
+                        (newAsset.marketValue - newAsset.totalCostBasis) >= 0 ? "text-emerald-400" : "text-red-400"
+                      )}>
+                        <span>{formatCurrency(newAsset.marketValue - newAsset.totalCostBasis)}</span>
+                        <span className="text-[10px]">
+                          {newAsset.totalCostBasis > 0 ? (((newAsset.marketValue - newAsset.totalCostBasis) / newAsset.totalCostBasis) * 100).toFixed(2) : '0.00'}%
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Submit Controls */}
+                <div className="flex items-center justify-end gap-3 pt-4 border-t border-slate-800">
                   <button 
                     type="button"
                     onClick={() => setIsAddModalOpen(false)}
-                    className="flex-1 py-3 px-4 bg-slate-800 hover:bg-slate-700 text-white font-semibold rounded-xl transition-all"
+                    className="px-5 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold rounded-xl transition-all"
                   >
                     Cancel
                   </button>
                   <button 
                     type="submit"
-                    disabled={isAdding}
-                    className="flex-1 py-3 px-4 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-800 disabled:text-slate-600 text-white font-semibold rounded-xl transition-all shadow-lg shadow-emerald-600/20 flex items-center justify-center gap-2"
+                    disabled={isAdding || (modalSelectedAccount && modalSelectedAccount.cashBalance < (newAsset.totalCostBasis || 0))}
+                    className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold rounded-xl transition-all shadow-lg shadow-emerald-600/30 flex items-center gap-2"
                   >
-                    {isAdding && <Loader2 className="w-4 h-4 animate-spin" />}
-                    {isAdding ? 'Adding...' : 'Add Asset'}
+                    {isAdding ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
+                    {isAdding ? 'Recording Trade...' : 'Add Contract Note Asset'}
                   </button>
                 </div>
               </form>
@@ -1054,7 +1321,7 @@ export default function PortfolioManagement({ portfolio, fund, accounts, role }:
                     required
                     type="number" 
                     value={newAsset.quantity}
-                    onChange={(e) => handleFinancialChange('quantity', Number(e.target.value))}
+                    onChange={(e) => handleContractNoteChange('quantity', Number(e.target.value))}
                     className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
                   />
                 </div>
@@ -1065,7 +1332,7 @@ export default function PortfolioManagement({ portfolio, fund, accounts, role }:
                       type="number" 
                       step="0.000001"
                       value={newAsset.costBasis || ''}
-                      onChange={(e) => handleFinancialChange('costBasis', Number(e.target.value))}
+                      onChange={(e) => handleContractNoteChange('costBasis', Number(e.target.value))}
                       className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
                     />
                   </div>
@@ -1075,7 +1342,7 @@ export default function PortfolioManagement({ portfolio, fund, accounts, role }:
                       type="number" 
                       step="0.01"
                       value={newAsset.totalCostBasis || ''}
-                      onChange={(e) => handleFinancialChange('totalCostBasis', Number(e.target.value))}
+                      onChange={(e) => handleContractNoteChange('totalCostBasis', Number(e.target.value))}
                       className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
                     />
                   </div>
@@ -1088,7 +1355,7 @@ export default function PortfolioManagement({ portfolio, fund, accounts, role }:
                       type="number" 
                       step="0.000001"
                       value={newAsset.currentPrice || ''}
-                      onChange={(e) => handleFinancialChange('currentPrice', Number(e.target.value))}
+                      onChange={(e) => handleContractNoteChange('currentPrice', Number(e.target.value))}
                       className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
                     />
                   </div>
@@ -1098,7 +1365,7 @@ export default function PortfolioManagement({ portfolio, fund, accounts, role }:
                       type="number" 
                       step="0.01"
                       value={newAsset.marketValue || ''}
-                      onChange={(e) => handleFinancialChange('marketValue', Number(e.target.value))}
+                      onChange={(e) => handleContractNoteChange('marketValue', Number(e.target.value))}
                       className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all font-bold text-emerald-400"
                     />
                   </div>
@@ -1301,6 +1568,121 @@ export default function PortfolioManagement({ portfolio, fund, accounts, role }:
                   Export PDF
                 </button>
               </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Sell Asset Modal */}
+      <AnimatePresence>
+        {isSellModalOpen && sellingAsset && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsSellModalOpen(false)}
+              className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="relative w-full max-w-lg bg-slate-900 border border-slate-800 rounded-3xl p-8 shadow-2xl"
+            >
+              <div className="flex items-center justify-between mb-6">
+                <div>
+                  <h3 className="text-2xl font-bold text-white">Sell / Dispose Asset</h3>
+                  <p className="text-sm text-slate-400 mt-1">{sellingAsset.name} ({sellingAsset.ticker})</p>
+                </div>
+                <button onClick={() => setIsSellModalOpen(false)} className="text-slate-400 hover:text-white p-2">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <form onSubmit={handleSellAsset} className="space-y-6">
+                <div className="bg-slate-800/50 border border-slate-700/50 p-4 rounded-xl space-y-2 text-xs">
+                  <div className="flex justify-between text-slate-400">
+                    <span>Current Holdings:</span>
+                    <strong className="text-white font-mono">{sellingAsset.quantity.toLocaleString()} shares</strong>
+                  </div>
+                  <div className="flex justify-between text-slate-400">
+                    <span>Average Cost Basis:</span>
+                    <strong className="text-white font-mono">{formatCurrency(sellingAsset.costBasis)}</strong>
+                  </div>
+                  <div className="flex justify-between text-slate-400">
+                    <span>Current Market Price:</span>
+                    <strong className="text-white font-mono">{formatCurrency(sellingAsset.currentPrice)}</strong>
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-slate-400">Quantity to Sell</label>
+                  <input 
+                    required
+                    type="number"
+                    max={sellingAsset.quantity}
+                    min={0.0001}
+                    step="any"
+                    value={sellForm.quantitySold || ''}
+                    onChange={(e) => setSellForm(prev => ({ ...prev, quantitySold: Number(e.target.value) }))}
+                    className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-amber-500 outline-none"
+                    placeholder="Enter quantity"
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-slate-400">Sale Price Per Share (GH₵)</label>
+                  <input 
+                    required
+                    type="number"
+                    step="0.0001"
+                    min={0}
+                    value={sellForm.salePrice || ''}
+                    onChange={(e) => setSellForm(prev => ({ ...prev, salePrice: Number(e.target.value) }))}
+                    className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-amber-500 outline-none"
+                    placeholder="Enter price"
+                  />
+                </div>
+
+                {sellForm.quantitySold > 0 && sellForm.salePrice > 0 && (
+                  <div className="bg-amber-500/10 border border-amber-500/20 p-4 rounded-xl space-y-1 text-xs">
+                    <div className="flex justify-between text-slate-300">
+                      <span>Total Sale Proceeds (Cash Added):</span>
+                      <strong className="text-emerald-400 font-mono text-sm">{formatCurrency(sellForm.quantitySold * sellForm.salePrice)}</strong>
+                    </div>
+                    <div className="flex justify-between text-slate-400">
+                      <span>Cost Basis of Shares Sold:</span>
+                      <strong className="text-white font-mono">{formatCurrency(sellForm.quantitySold * sellingAsset.costBasis)}</strong>
+                    </div>
+                    <div className="flex justify-between text-slate-300 font-bold border-t border-amber-500/20 pt-1 mt-1">
+                      <span>Realized Gain/Loss:</span>
+                      <span className={(sellForm.salePrice - sellingAsset.costBasis) >= 0 ? "text-emerald-400 font-mono" : "text-red-400 font-mono"}>
+                        {(sellForm.salePrice - sellingAsset.costBasis) >= 0 ? '+' : ''}
+                        {formatCurrency(sellForm.quantitySold * (sellForm.salePrice - sellingAsset.costBasis))}
+                      </span>
+                    </div>
+                  </div>
+                )}
+
+                <div className="flex gap-3">
+                  <button 
+                    type="button"
+                    onClick={() => setIsSellModalOpen(false)}
+                    className="flex-1 py-3 bg-slate-800 hover:bg-slate-700 text-white font-semibold rounded-xl transition-all"
+                  >
+                    Cancel
+                  </button>
+                  <button 
+                    type="submit"
+                    disabled={isSelling || sellForm.quantitySold <= 0 || sellForm.quantitySold > sellingAsset.quantity}
+                    className="flex-1 py-3 bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white font-semibold rounded-xl transition-all shadow-lg shadow-amber-600/20 flex items-center justify-center gap-2"
+                  >
+                    {isSelling ? <Loader2 className="w-4 h-4 animate-spin" /> : <MinusCircle className="w-4 h-4" />}
+                    Confirm Asset Sale
+                  </button>
+                </div>
+              </form>
             </motion.div>
           </div>
         )}

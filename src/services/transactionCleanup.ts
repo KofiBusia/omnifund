@@ -96,14 +96,17 @@ export const deleteTransactionsOnDate = async (
     const amount = Number(t.totalAmount) || Number((t as any).amount) || 0;
 
     let unitsDelta = 0;
-    let amountDelta = 0;
+    let cashDelta = 0;
+    let investmentDelta = 0;
 
     if (t.type === 'BUY') {
       unitsDelta = -units;
-      amountDelta = -amount;
+      cashDelta = -amount;
+      investmentDelta = -amount;
     } else {
       unitsDelta = units;
-      amountDelta = amount;
+      cashDelta = amount; // Reversing SELL adds cash back to investor balance logic
+      investmentDelta = t.costBasisReduction ? t.costBasisReduction : amount;
     }
 
     try {
@@ -118,14 +121,14 @@ export const deleteTransactionsOnDate = async (
         if (accountRef && accountSnap && accountSnap.exists()) {
           dbTx.update(accountRef, {
             totalUnits: increment(unitsDelta),
-            cashBalance: increment(amountDelta)
+            cashBalance: increment(cashDelta)
           });
         }
 
         if (investorRef && investorSnap && investorSnap.exists()) {
           dbTx.update(investorRef, {
             unitsOwned: increment(unitsDelta),
-            totalInvestment: increment(amountDelta)
+            totalInvestment: increment(investmentDelta)
           });
         }
 

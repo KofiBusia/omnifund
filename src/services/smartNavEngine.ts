@@ -2,6 +2,7 @@ import { collection, getDocs, query, where } from 'firebase/firestore';
 import { db } from '../firebase';
 import { Asset, AssetValuation, InvestmentAccount, Transaction, Valuation } from '../types';
 import { safeDate, safeISODate, safeFormatDate, safeTimestamp } from '../lib/utils';
+import { calculateNetAssets, calculateNavPerUnit, roundNav, roundMoney } from './fundAccountingEngine';
 
 export interface SmartNavResult {
   nav: number;
@@ -158,21 +159,27 @@ export async function calculateSmartNavForDate(
   let confidence: SmartNavResult['confidence'] = 'fallback';
 
   if (totalPortfolioValueAtDate > 0 && totalUnitsAtDate > 0) {
-    // Method A: Direct Portfolio Assets Valuation / Investor Units Outstanding
-    computedNav = totalPortfolioValueAtDate / totalUnitsAtDate;
-    totalAum = totalPortfolioValueAtDate;
-    valuationSource = `Portfolio Asset Reconstruction (${assetBreakdown.length} assets, GH₵${totalAum.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} AUM / ${totalUnitsAtDate.toLocaleString()} units)`;
+    // Method A: Direct Portfolio Assets Valuation + Cash - Liabilities / Investor Units
+    const cash = options?.account?.cashBalance || 0;
+    const liabilities = options?.account?.liabilities || 0;
+    const accruedFees = options?.account?.accruedFees || 0;
+    const receivables = options?.account?.receivables || 0;
+
+    const { netAssets } = calculateNetAssets(totalPortfolioValueAtDate, cash, receivables, liabilities, accruedFees);
+    computedNav = calculateNavPerUnit(netAssets, totalUnitsAtDate, options?.account?.nav || 1.0000);
+    totalAum = netAssets;
+    valuationSource = `Portfolio Asset Reconstruction (${assetBreakdown.length} assets, GH₵${totalAum.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} Net Assets / ${totalUnitsAtDate.toLocaleString()} units)`;
     confidence = 'high';
   } else if (closestValuationLog && closestValuationLog.nav > 0) {
     // Method B: Closest Valuation Log Entry on or before target date
-    computedNav = closestValuationLog.nav;
-    totalAum = closestValuationLog.aum || (totalUnitsAtDate * computedNav);
+    computedNav = roundNav(closestValuationLog.nav);
+    totalAum = roundMoney(closestValuationLog.aum || (totalUnitsAtDate * computedNav));
     valuationSource = `Historical Account Valuation Log (${safeFormatDate(closestValuationLog.date)})`;
     confidence = 'medium';
   } else if (options?.account?.nav) {
     // Method C: Account Default NAV
-    computedNav = options.account.nav;
-    totalAum = options.account.aum || 0;
+    computedNav = roundNav(options.account.nav);
+    totalAum = roundMoney(options.account.aum || 0);
     valuationSource = `Account Baseline NAV (GH₵${computedNav.toFixed(4)})`;
     confidence = 'fallback';
   } else {
