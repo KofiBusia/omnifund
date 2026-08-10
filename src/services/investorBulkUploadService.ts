@@ -214,60 +214,55 @@ export function analyseInvestorBulkCsv(
       warningOrError = 'Invalid email address format';
     }
 
-    // Financial Mode B Processing
-    let fundTicker = '';
-    let accountType = 'Growth';
-    let transactionDate = '';
-    let transactionType: StagedInvestorRow['transactionType'] = 'Subscription';
-    let amount = 0;
+    // Financial & Unit Processing (Extracted for both MASTER_ONLY and MASTER_AND_INVESTMENT modes)
+    let fundTicker = extractRowField(row, ['Fund Ticker', 'Fund', 'Ticker', 'Scheme']);
+    let accountType = extractRowField(row, ['Account Type', 'Share Class']) || 'Growth';
+    const rawTxDate = extractRowField(row, ['Transaction Date', 'Date', 'Txn Date', 'Effective Date', 'Inception Date', 'Registration Date', 'Joining Date', 'Value Date']);
+    const rawTxType = extractRowField(row, ['Transaction Type', 'Type', 'Action']);
+    const rawAmountVal = extractRowField(row, ['Amount (GHS)', 'Amount', 'Contribution', 'Deposit', 'Subscription Amount', 'Investment Amount', 'Total Investment', 'Value', 'Market Value', 'Initial Capital', 'Capital', 'Balance (GHS)', 'Financial Balance']);
+    const rawUnitsVal = extractRowField(row, ['Imported Units (Optional)', 'Imported Units', 'Units', 'Units Owned', 'Unit Balance', 'Total Units', 'Shares', 'Share Count', 'Initial Units', 'Holding Units', 'Units Held', 'Share Balance']);
+
+    let transactionDate = parseAndNormaliseDate(rawTxDate) || new Date().toISOString().split('T')[0];
+    let transactionType: StagedInvestorRow['transactionType'] = (rawTxType?.toLowerCase().includes('red') || rawTxType?.toLowerCase().includes('sell')) ? 'Redemption' : 'Subscription';
+    
+    let parsedAmount = Number(String(rawAmountVal || 0).replace(/[^0-9.-]+/g, ''));
+    let parsedUnits = rawUnitsVal ? Number(String(rawUnitsVal).replace(/[^0-9.-]+/g, '')) : undefined;
+
+    const accId = targetAccount?.id || 'acc1';
+    const navLookup = resolveHistoricalNavForDate(accId, transactionDate, valuations, targetAccount?.nav || 1.0000);
+    let applicableNav: number | undefined = navLookup?.nav || targetAccount?.nav || 1.0000;
+
+    // Smart unit/amount inter-derivation
+    if ((isNaN(parsedAmount) || parsedAmount <= 0) && parsedUnits !== undefined && !isNaN(parsedUnits) && parsedUnits > 0) {
+      parsedAmount = roundMoney(parsedUnits * (applicableNav || 1.0000));
+    }
+    if ((parsedUnits === undefined || isNaN(parsedUnits) || parsedUnits <= 0) && parsedAmount > 0) {
+      parsedUnits = roundUnits(parsedAmount / (applicableNav || 1.0000));
+    }
+
+    let amount = parsedAmount > 0 ? parsedAmount : 0;
+    let importedUnits: number | undefined = (parsedUnits && parsedUnits > 0) ? parsedUnits : undefined;
+    let calculatedUnits: number | undefined = (amount > 0 && applicableNav > 0) ? roundUnits(amount / applicableNav) : importedUnits;
     let currency = 'GHS';
-    let applicableNav: number | undefined = undefined;
-    let calculatedUnits: number | undefined = undefined;
-    let importedUnits: number | undefined = undefined;
     let unitDiscrepancyDelta = 0;
     let hasUnitDiscrepancy = false;
 
     if (mode === 'MASTER_AND_INVESTMENT' && status !== 'ERROR') {
-      fundTicker = extractRowField(row, ['Fund Ticker', 'Fund', 'Ticker', 'Scheme']);
-      accountType = extractRowField(row, ['Account Type', 'Share Class']) || 'Growth';
-      const rawTxDate = extractRowField(row, ['Transaction Date', 'Date', 'Txn Date', 'Effective Date']);
-      const rawTxType = extractRowField(row, ['Transaction Type', 'Type', 'Action']);
-      const rawAmountVal = extractRowField(row, ['Amount (GHS)', 'Amount', 'Contribution', 'Deposit', 'Subscription Amount', 'Investment Amount']);
-      const rawUnitsVal = extractRowField(row, ['Imported Units (Optional)', 'Imported Units', 'Units', 'Share Count']);
-
-      transactionDate = parseAndNormaliseDate(rawTxDate) || '';
-      amount = Number(String(rawAmountVal || 0).replace(/[^0-9.-]+/g, ''));
-      importedUnits = rawUnitsVal ? Number(String(rawUnitsVal).replace(/[^0-9.-]+/g, '')) : undefined;
-
-      if (!transactionDate) {
+      if (amount <= 0 && (!importedUnits || importedUnits <= 0)) {
         status = 'ERROR';
-        warningOrError = 'Valid Transaction Date (YYYY-MM-DD) is required for financial investment import';
-      } else if (isNaN(amount) || amount <= 0) {
-        status = 'ERROR';
-        warningOrError = 'Investment amount must be a positive number';
+        warningOrError = 'Either investment amount or units owned must be provided as a positive number';
       } else {
-        // Resolve Historical NAV for Transaction Date
-        const accId = targetAccount?.id || 'acc1';
-        const navLookup = resolveHistoricalNavForDate(accId, transactionDate, valuations, targetAccount?.nav);
-        
-        if (!navLookup) {
-          status = 'NAV_REQUIRED';
-          warningOrError = `No applicable NAV recorded on or before ${transactionDate}`;
-        } else {
-          applicableNav = navLookup.nav;
-          calculatedUnits = roundUnits(amount / applicableNav);
-          totalSubscriptionAmount += amount;
-          totalCalculatedUnits += calculatedUnits;
+        totalSubscriptionAmount += amount;
+        totalCalculatedUnits += (calculatedUnits || importedUnits || 0);
 
-          // Unit Discrepancy Inspection
-          if (importedUnits !== undefined && !isNaN(importedUnits) && importedUnits > 0) {
-            unitDiscrepancyDelta = Math.abs(importedUnits - calculatedUnits);
-            if (unitDiscrepancyDelta > 0.0001) {
-              hasUnitDiscrepancy = true;
-              hasDiscrepancies = true;
-              status = 'WARNING';
-              warningOrError = `Unit Discrepancy: Imported (${importedUnits.toFixed(4)}) vs Calculated (${calculatedUnits.toFixed(4)}) at NAV GH₵${applicableNav.toFixed(4)}`;
-            }
+        // Unit Discrepancy Inspection
+        if (importedUnits !== undefined && calculatedUnits !== undefined && importedUnits > 0 && calculatedUnits > 0) {
+          unitDiscrepancyDelta = Math.abs(importedUnits - calculatedUnits);
+          if (unitDiscrepancyDelta > 0.0001) {
+            hasUnitDiscrepancy = true;
+            hasDiscrepancies = true;
+            status = 'WARNING';
+            warningOrError = `Unit Discrepancy: Imported (${importedUnits.toFixed(4)}) vs Calculated (${calculatedUnits.toFixed(4)}) at NAV GH₵${applicableNav.toFixed(4)}`;
           }
         }
       }
@@ -279,7 +274,7 @@ export function analyseInvestorBulkCsv(
     }
 
     if (status === 'ERROR') errorRowsCount++;
-    else if (status === 'WARNING' || status === 'NAV_REQUIRED') warningRowsCount++;
+    else if (status === 'WARNING' || (status as string) === 'NAV_REQUIRED') warningRowsCount++;
     else if ((status as string) === 'DUPLICATE') duplicateRowsCount++;
     else validRowsCount++;
 
@@ -384,6 +379,9 @@ export async function commitInvestorBulkBatch(
         const newInvCode = row.investorId || `INV-${String(Math.floor(100000 + Math.random() * 900000))}`;
         const newInvRef = doc(collection(db, 'investors'));
 
+        const initialUnits = row.importedUnits || row.calculatedUnits || (row.amount && row.applicableNav ? roundUnits(row.amount / row.applicableNav) : 0);
+        const initialInvAmt = row.amount || (initialUnits && row.applicableNav ? roundMoney(initialUnits * row.applicableNav) : 0);
+
         const newInvData: Investor = {
           id: newInvRef.id,
           investorId: newInvCode,
@@ -393,9 +391,9 @@ export async function commitInvestorBulkBatch(
           email: row.email || '',
           phone: row.phone || '',
           address: row.address || '',
-          unitsOwned: 0, // MUST start at zero; units created exclusively by transaction engine!
-          totalInvestment: 0,
-          currentValue: 0,
+          unitsOwned: batch.importMode === 'MASTER_ONLY' ? initialUnits : 0,
+          totalInvestment: batch.importMode === 'MASTER_ONLY' ? initialInvAmt : 0,
+          currentValue: batch.importMode === 'MASTER_ONLY' ? roundMoney(initialUnits * (row.applicableNav || targetAccount.nav || 1)) : 0,
           kycStatus: (row.kycStatus === 'rejected' ? 'rejected' : row.kycStatus === 'pending' ? 'pending' : 'verified'),
           portalStatus: 'NOT_ENABLED',
           createdAt: new Date().toISOString(),

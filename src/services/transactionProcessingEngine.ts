@@ -456,7 +456,7 @@ export async function postTransactionBatch(
             investor.unitsOwned,
             investor.totalInvestment
           );
-          unitsDelta = sub.unitsIssued;
+          unitsDelta = (record.calculatedUnits && record.calculatedUnits > 0) ? record.calculatedUnits : sub.unitsIssued;
           cashDelta = sub.grossAmount;
           costBasisDelta = sub.grossAmount;
         } else if (record.normalisedType === 'Redemption' || record.normalisedType === 'SELL') {

@@ -52,7 +52,7 @@ export default function InvestorBulkUploadModal({
   valuations,
   onSuccess
 }: InvestorBulkUploadModalProps) {
-  const [importMode, setImportMode] = useState<InvestorImportMode>('MASTER_ONLY');
+  const [importMode, setImportMode] = useState<InvestorImportMode>('MASTER_AND_INVESTMENT');
   const [selectedAccountId, setSelectedAccountId] = useState<string>(accounts[0]?.id || 'acc1');
   const [stagedBatch, setStagedBatch] = useState<StagedInvestorBatch | null>(null);
   const [isAnalysing, setIsAnalysing] = useState(false);
@@ -75,10 +75,26 @@ export default function InvestorBulkUploadModal({
       skipEmptyLines: true,
       complete: (results) => {
         try {
+          // Auto-detect unit & financial headers
+          const sampleRow = (results.data[0] as Record<string, any>) || {};
+          const headers = Object.keys(sampleRow).map(h => h.trim().toLowerCase());
+          const hasFinancialHeaders = headers.some(h => 
+            h.includes('amount') || h.includes('unit') || h.includes('contribution') || 
+            h.includes('deposit') || h.includes('subscription') || h.includes('investment') ||
+            h.includes('share') || h.includes('balance') || h.includes('capital')
+          );
+
+          let activeMode = importMode;
+          if (hasFinancialHeaders && importMode === 'MASTER_ONLY') {
+            activeMode = 'MASTER_AND_INVESTMENT';
+            setImportMode('MASTER_AND_INVESTMENT');
+            toast.info('Auto-detected unit/financial columns in CSV. Enabled Master + Investment Mode.', { id: toastId });
+          }
+
           const batch = analyseInvestorBulkCsv(
             results.data,
             file.name,
-            importMode,
+            activeMode,
             selectedAccountId,
             investors,
             accounts,
