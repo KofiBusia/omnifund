@@ -24,7 +24,7 @@ import { approveInvestorAndEnablePortal, resendPortalInvitation } from './invest
  * 1. CSV Template Downloads
  * Generates pure CSV data templates with standard headers and sample demonstration records.
  */
-export function downloadInvestorCsvTemplate(mode: InvestorImportMode = 'MASTER_ONLY'): void {
+export function downloadInvestorCsvTemplate(mode: InvestorImportMode = 'MASTER_AND_INVESTMENT'): void {
   let headers: string[] = [];
   let sampleRows: string[][] = [];
   let filename = '';
@@ -51,6 +51,7 @@ export function downloadInvestorCsvTemplate(mode: InvestorImportMode = 'MASTER_O
       ['INV-000102', 'Individual', 'Abena Osei', 'Abena', '', 'Osei', 'abena.osei@example.com', '+233200003344', 'Kumasi Ghana', '1990-11-20', 'Passport', 'G1234567', 'verified'],
       ['INV-000103', 'Corporate', 'Kofi Holdings Ltd', 'Kofi', '', 'Holdings', 'info@kofiholdings.com', '+233302005566', 'Airport City Accra', '', 'Business Reg', 'CS-98765432', 'verified']
     ];
+  } else {
     filename = 'OmniFund_Investor_Financial_Template_v1.0.csv';
     headers = [
       'Full Name',
@@ -72,7 +73,7 @@ export function downloadInvestorCsvTemplate(mode: InvestorImportMode = 'MASTER_O
     ...sampleRows.map(row => row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(','))
   ].join('\n');
 
-  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+  const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.setAttribute('href', url);

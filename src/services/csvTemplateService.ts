@@ -83,20 +83,18 @@ export function downloadInvestorMasterTemplate() {
  */
 export function downloadInvestorFinancialTemplate() {
   const headers = [
-    'Transaction Date',
-    'Investor ID',
     'Full Name',
-    'Email Address',
-    'Phone Number',
-    'Investment Amount',
-    'Units',
-    'Transaction Type'
+    'Email',
+    'Date',
+    'Amount',
+    'Transaction Type',
+    'Fund Ticker'
   ];
 
   const sampleRows = [
-    ['2026-04-24', 'INV-001', 'Abena Osei', 'abena.osei@example.com', '0244123456', '1000.00', '', 'Subscription'],
-    ['2026-04-24', 'INV-002', 'Kofi Mensah', 'kofi.mensah@example.com', '0200987654', '5000.00', '', 'Contribution'],
-    ['2026-04-25', '', 'Yaw Berko', 'yaw.berko@example.com', '0555443322', '2500.00', '', 'Subscription']
+    ['Kwame Mensah', 'kwame.mensah@example.com', '2026-04-24', '1000.00', 'Subscription', 'OGEF'],
+    ['Abena Osei', 'abena.osei@example.com', '2026-04-24', '500.00', 'Subscription', 'OGEF'],
+    ['Kofi Holdings Ltd', 'info@kofiholdings.com', '2026-04-24', '5000.00', 'Subscription', 'OGEF']
   ];
 
   const csvContent = [
@@ -104,7 +102,7 @@ export function downloadInvestorFinancialTemplate() {
     ...sampleRows.map(row => row.map(val => `"${String(val).replace(/"/g, '""')}"`).join(','))
   ].join('\n');
 
-  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+  const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.setAttribute('href', url);
