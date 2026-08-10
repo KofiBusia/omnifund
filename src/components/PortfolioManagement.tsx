@@ -804,7 +804,7 @@ export default function PortfolioManagement({ portfolio, fund, accounts, role }:
         )}
       </div>
 
-      {/* Redesigned Asset Adding Modal — Broker Contract Note Standard */}
+      {/* Streamlined Asset Addition Modal — Contract Note Standard */}
       <AnimatePresence>
         {isAddModalOpen && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-md">
@@ -812,23 +812,18 @@ export default function PortfolioManagement({ portfolio, fund, accounts, role }:
               initial={{ opacity: 0, scale: 0.95, y: 20 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.95, y: 20 }}
-              className="relative w-full max-w-4xl bg-slate-900 border border-slate-800 rounded-3xl overflow-hidden shadow-2xl max-h-[92vh] flex flex-col"
+              className="relative w-full max-w-3xl bg-slate-900 border border-slate-800 rounded-3xl overflow-hidden shadow-2xl flex flex-col"
             >
               {/* Header */}
-              <div className="p-6 bg-gradient-to-r from-emerald-950/40 via-slate-900 to-slate-900 border-b border-slate-800 flex items-center justify-between flex-shrink-0">
+              <div className="p-6 bg-gradient-to-r from-emerald-950/40 via-slate-900 to-slate-900 border-b border-slate-800 flex items-center justify-between">
                 <div className="flex items-center gap-3">
-                  <div className="p-3 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400">
-                    <FileText className="w-6 h-6" />
+                  <div className="p-2.5 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400">
+                    <FileText className="w-5 h-5" />
                   </div>
                   <div>
-                    <div className="flex items-center gap-2">
-                      <h3 className="text-xl font-bold text-white">Record Equity Investment & Contract Note</h3>
-                      <span className="text-[10px] font-mono bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded-full font-bold">
-                        GSE Broker Contract Note Standard
-                      </span>
-                    </div>
+                    <h3 className="text-lg font-bold text-white">Record Equity Purchase (Contract Note)</h3>
                     <p className="text-xs text-slate-400 mt-0.5">
-                      Ingest trade consideration, GSE/SEC levies, and broker commissions matching official broker contract notes
+                      Direct trade execution entry matching broker contract note headings
                     </p>
                   </div>
                 </div>
@@ -840,306 +835,188 @@ export default function PortfolioManagement({ portfolio, fund, accounts, role }:
                 </button>
               </div>
 
-              <form onSubmit={handleAddAsset} className="p-6 overflow-y-auto space-y-6 flex-1 text-xs">
-                {/* Cash Availability Banner */}
-                {modalSelectedAccount && (
-                  <div className={cn(
-                    "p-4 rounded-2xl border flex items-center justify-between transition-all",
-                    modalSelectedAccount.cashBalance < (newAsset.totalCostBasis || 0)
-                      ? "bg-red-500/10 border-red-500/30 text-red-400"
-                      : "bg-slate-950/80 border-slate-800 text-slate-300"
-                  )}>
-                    <div className="flex items-center gap-2.5">
-                      <DollarSign className="w-4 h-4 text-emerald-400" />
-                      <div>
-                        <span className="text-[10px] uppercase font-bold text-slate-500 block">Target Fund Cash Balance</span>
-                        <strong className="text-sm font-bold text-white font-mono">{formatCurrency(modalSelectedAccount.cashBalance)}</strong>
-                      </div>
-                    </div>
-                    {modalSelectedAccount.cashBalance < (newAsset.totalCostBasis || 0) && (
-                      <span className="text-xs font-bold text-red-400 flex items-center gap-1 bg-red-500/20 px-3 py-1 rounded-full border border-red-500/30">
-                        <AlertCircle className="w-3.5 h-3.5" /> Insufficient Available Cash
-                      </span>
-                    )}
+              <form onSubmit={handleAddAsset} className="p-6 space-y-5 text-xs">
+                {/* Target Account Selector & Cash Availability */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 p-3.5 bg-slate-950/60 border border-slate-800/80 rounded-2xl items-center">
+                  <div>
+                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">Target Fund Account</label>
+                    <select 
+                      required
+                      value={newAsset.accountId}
+                      onChange={(e) => setNewAsset({...newAsset, accountId: e.target.value})}
+                      className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-white font-medium focus:border-emerald-500 outline-none"
+                    >
+                      {accounts.map(acc => (
+                        <option key={acc.id} value={acc.id}>{acc.name} ({acc.ticker})</option>
+                      ))}
+                    </select>
                   </div>
-                )}
-
-                {/* Section 1: Broker & Custody Reference */}
-                <div className="p-4 bg-slate-950/60 border border-slate-800 rounded-2xl space-y-4">
-                  <div className="flex items-center justify-between border-b border-slate-800/80 pb-2">
-                    <span className="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-1.5">
-                      <Building2 className="w-3.5 h-3.5 text-blue-400" />
-                      1. Broker & Custody Reference
-                    </span>
-                    <span className="text-[10px] text-slate-500">e.g. Merban Stockbrokers Ltd Note</span>
-                  </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-                    <div className="space-y-1.5">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Target Fund Account</label>
-                      <select 
-                        required
-                        value={newAsset.accountId}
-                        onChange={(e) => setNewAsset({...newAsset, accountId: e.target.value})}
-                        className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-white focus:border-emerald-500 outline-none"
-                      >
-                        {accounts.map(acc => (
-                          <option key={acc.id} value={acc.id}>{acc.name} ({acc.ticker})</option>
-                        ))}
-                      </select>
+                  {modalSelectedAccount && (
+                    <div className="sm:text-right">
+                      <span className="text-[10px] uppercase font-bold text-slate-500 block">Available Cash</span>
+                      <strong className={cn(
+                        "text-sm font-bold font-mono",
+                        modalSelectedAccount.cashBalance < (newAsset.totalCostBasis || 0) ? "text-red-400" : "text-emerald-400"
+                      )}>
+                        {formatCurrency(modalSelectedAccount.cashBalance)}
+                      </strong>
                     </div>
-
-                    <div className="space-y-1.5">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Broker Name</label>
-                      <select 
-                        value={newAsset.brokerName}
-                        onChange={(e) => setNewAsset({...newAsset, brokerName: e.target.value})}
-                        className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-white focus:border-emerald-500 outline-none font-medium"
-                      >
-                        <option value="Merban Stockbrokers Ltd">Merban Stockbrokers Ltd</option>
-                        <option value="IC Securities Ltd">IC Securities Ltd</option>
-                        <option value="Databank Brokerage Ltd">Databank Brokerage Ltd</option>
-                        <option value="UMB Capital Ltd">UMB Capital Ltd</option>
-                        <option value="EDC Stockbrokers">EDC Stockbrokers</option>
-                        <option value="Black Star Brokerage">Black Star Brokerage</option>
-                        <option value="Other Licensed Broker">Other Licensed Broker</option>
-                      </select>
-                    </div>
-
-                    <div className="space-y-1.5">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">CSD Account No.</label>
-                      <input 
-                        type="text"
-                        value={newAsset.csdNumber}
-                        onChange={(e) => setNewAsset({...newAsset, csdNumber: e.target.value})}
-                        placeholder="e.g. UMBBBXX-Y020260303TYT4-0001"
-                        className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-white focus:border-emerald-500 outline-none font-mono text-[11px]"
-                      />
-                    </div>
-
-                    <div className="space-y-1.5">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Trade / Settlement Date</label>
-                      <input 
-                        required
-                        type="date"
-                        value={newAsset.recordedAt}
-                        onChange={(e) => setNewAsset({...newAsset, recordedAt: e.target.value})}
-                        className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-white focus:border-emerald-500 outline-none font-mono"
-                      />
-                    </div>
-                  </div>
+                  )}
                 </div>
 
-                {/* Section 2: Equity / Asset Identification */}
-                <div className="p-4 bg-slate-950/60 border border-slate-800 rounded-2xl space-y-4">
-                  <div className="flex items-center justify-between border-b border-slate-800/80 pb-2">
-                    <span className="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-1.5">
-                      <Briefcase className="w-3.5 h-3.5 text-teal-400" />
-                      2. Equity Asset Details
-                    </span>
+                {/* Core Contract Note Fields Grid — Directly matching PDF headings */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                  {/* 1. Trade Date */}
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-bold text-slate-300 flex items-center gap-1">
+                      <span>Trade Date</span>
+                      <span className="text-red-400">*</span>
+                    </label>
+                    <input 
+                      required
+                      type="date"
+                      value={newAsset.recordedAt}
+                      onChange={(e) => setNewAsset({...newAsset, recordedAt: e.target.value})}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-white font-mono focus:border-emerald-500 outline-none"
+                    />
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                    <div className="space-y-1.5">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Ticker Symbol</label>
+                  {/* 2. Name of Equity & Ticker */}
+                  <div className="space-y-1 sm:col-span-3">
+                    <label className="text-[11px] font-bold text-slate-300 flex items-center gap-1">
+                      <span>Name of Equity & Ticker</span>
+                      <span className="text-red-400">*</span>
+                    </label>
+                    <div className="flex gap-2">
                       <input 
                         required
                         type="text" 
                         value={newAsset.ticker}
-                        onChange={(e) => setNewAsset({...newAsset, ticker: e.target.value.toUpperCase()})}
-                        placeholder="e.g. MTNGH"
-                        className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm font-bold text-white focus:border-emerald-500 outline-none font-mono tracking-wider"
+                        onChange={(e) => {
+                          const val = e.target.value.toUpperCase();
+                          setNewAsset(prev => ({
+                            ...prev, 
+                            ticker: val,
+                            name: prev.name && prev.name !== prev.ticker ? prev.name : val
+                          }));
+                        }}
+                        placeholder="Ticker (e.g. MTNGH)"
+                        className="w-1/3 bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 font-mono font-bold text-white focus:border-emerald-500 outline-none uppercase"
                       />
-                    </div>
-
-                    <div className="space-y-1.5">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Name of Equity / Asset</label>
                       <input 
                         required
                         type="text" 
                         value={newAsset.name}
                         onChange={(e) => setNewAsset({...newAsset, name: e.target.value})}
-                        placeholder="e.g. Scancom PLC (MTN Ghana)"
-                        className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm font-semibold text-white focus:border-emerald-500 outline-none"
+                        placeholder="Equity Name (e.g. Scancom PLC)"
+                        className="w-2/3 bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-white focus:border-emerald-500 outline-none font-medium"
                       />
                     </div>
+                  </div>
 
-                    <div className="space-y-1.5">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Sector / Asset Class</label>
-                      <select 
-                        required
-                        value={newAsset.sector}
-                        onChange={(e) => setNewAsset({...newAsset, sector: e.target.value})}
-                        className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-white focus:border-emerald-500 outline-none font-medium"
-                      >
-                        <option value="Telecoms / Tech">Telecoms / Tech</option>
-                        <option value="Banking">Banking</option>
-                        <option value="Mining">Mining</option>
-                        <option value="Energy">Energy</option>
-                        <option value="Consumer Goods">Consumer Goods</option>
-                        <option value="Fixed Income / Treasury">Fixed Income / Treasury</option>
-                        <option value="Cash & Equivalents">Cash & Equivalents</option>
-                        <option value="Other">Other</option>
-                      </select>
+                  {/* 3. No. of Shares */}
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-bold text-slate-300 flex items-center gap-1">
+                      <span>No. of Shares</span>
+                      <span className="text-red-400">*</span>
+                    </label>
+                    <input 
+                      required
+                      type="number"
+                      min="1"
+                      value={newAsset.quantity || ''}
+                      onChange={(e) => handleContractNoteChange('quantity', Number(e.target.value))}
+                      placeholder="e.g. 449"
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-white font-mono font-bold text-sm focus:border-emerald-500 outline-none"
+                    />
+                  </div>
+
+                  {/* 4. Trade Price */}
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-bold text-slate-300 flex items-center gap-1">
+                      <span>Trade Price (GH₵)</span>
+                      <span className="text-red-400">*</span>
+                    </label>
+                    <input 
+                      required
+                      type="number"
+                      step="0.0001"
+                      value={newAsset.tradePrice || ''}
+                      onChange={(e) => handleContractNoteChange('tradePrice', Number(e.target.value))}
+                      placeholder="e.g. 6.60"
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-white font-mono text-sm focus:border-emerald-500 outline-none"
+                    />
+                  </div>
+
+                  {/* 5. Trade Consideration */}
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-bold text-slate-400">Trade Consideration</label>
+                    <div className="w-full bg-slate-950/80 border border-slate-800/80 rounded-xl px-3 py-2 text-slate-200 font-mono font-bold text-sm">
+                      {formatCurrency(newAsset.tradeConsideration || (newAsset.quantity * newAsset.tradePrice))}
                     </div>
+                  </div>
+
+                  {/* 6. Trade Levies */}
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-bold text-slate-300">Trade Levies (GH₵)</label>
+                    <input 
+                      type="number"
+                      step="0.01"
+                      value={newAsset.tradeLevies || ''}
+                      onChange={(e) => handleContractNoteChange('tradeLevies', Number(e.target.value))}
+                      placeholder="e.g. 20.74"
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-amber-400 font-mono text-sm focus:border-emerald-500 outline-none"
+                    />
+                  </div>
+
+                  {/* 7. Broker Commission */}
+                  <div className="space-y-1 lg:col-span-2">
+                    <label className="text-[11px] font-bold text-slate-300">Broker Commission (GH₵)</label>
+                    <input 
+                      type="number"
+                      step="0.01"
+                      value={newAsset.brokerCommission || ''}
+                      onChange={(e) => handleContractNoteChange('brokerCommission', Number(e.target.value))}
+                      placeholder="e.g. 53.34"
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-amber-400 font-mono text-sm focus:border-emerald-500 outline-none"
+                    />
                   </div>
                 </div>
 
-                {/* Section 3: Contract Note Financial Execution & Fees */}
-                <div className="p-4 bg-slate-950/60 border border-slate-800 rounded-2xl space-y-4">
-                  <div className="flex items-center justify-between border-b border-slate-800/80 pb-2">
-                    <span className="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-1.5">
-                      <Activity className="w-3.5 h-3.5 text-amber-400" />
-                      3. Trade Execution & Charges Breakdown
-                    </span>
-                    <span className="text-[10px] text-amber-400 font-mono">Auto-Calculating Settlement</span>
-                  </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
-                    <div className="space-y-1.5">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">No. of Shares (Qty)</label>
-                      <input 
-                        required
-                        type="number"
-                        min="1"
-                        value={newAsset.quantity || ''}
-                        onChange={(e) => handleContractNoteChange('quantity', Number(e.target.value))}
-                        placeholder="e.g. 449"
-                        className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-white font-mono font-bold text-sm focus:border-emerald-500 outline-none"
-                      />
-                    </div>
-
-                    <div className="space-y-1.5">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Trade Price (GH₵)</label>
-                      <input 
-                        required
-                        type="number"
-                        step="0.0001"
-                        value={newAsset.tradePrice || ''}
-                        onChange={(e) => handleContractNoteChange('tradePrice', Number(e.target.value))}
-                        placeholder="e.g. 6.60"
-                        className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-white font-mono text-sm focus:border-emerald-500 outline-none"
-                      />
-                    </div>
-
-                    <div className="space-y-1.5">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Trade Consideration</label>
-                      <div className="w-full bg-slate-900/90 border border-slate-800 rounded-xl px-3 py-2 text-slate-200 font-mono font-bold">
-                        {formatCurrency(newAsset.tradeConsideration || (newAsset.quantity * newAsset.tradePrice))}
-                      </div>
-                    </div>
-
-                    <div className="space-y-1.5">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Trade Levies (GH₵)</label>
-                      <input 
-                        type="number"
-                        step="0.01"
-                        value={newAsset.tradeLevies || ''}
-                        onChange={(e) => handleContractNoteChange('tradeLevies', Number(e.target.value))}
-                        placeholder="e.g. 20.74"
-                        className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-amber-400 font-mono text-sm focus:border-emerald-500 outline-none"
-                      />
-                    </div>
-
-                    <div className="space-y-1.5">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Broker Commission (GH₵)</label>
-                      <input 
-                        type="number"
-                        step="0.01"
-                        value={newAsset.brokerCommission || ''}
-                        onChange={(e) => handleContractNoteChange('brokerCommission', Number(e.target.value))}
-                        placeholder="e.g. 53.34"
-                        className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-amber-400 font-mono text-sm focus:border-emerald-500 outline-none"
-                      />
-                    </div>
-                  </div>
-
-                  {/* Contract Note Receipt Calculation Box */}
-                  <div className="p-4 bg-slate-900/90 border border-slate-800 rounded-xl space-y-2">
-                    <div className="flex items-center justify-between text-slate-400 text-[11px] pb-1 border-b border-slate-800/60 font-mono">
-                      <span>Trade Consideration ({newAsset.quantity} shares @ GH₵{newAsset.tradePrice})</span>
-                      <span className="text-slate-200 font-bold">{formatCurrency(newAsset.tradeConsideration)}</span>
-                    </div>
-                    <div className="flex items-center justify-between text-slate-400 text-[11px] pb-1 border-b border-slate-800/60 font-mono">
-                      <span>+ GSE / SEC / CSD Trade Levies</span>
-                      <span className="text-amber-400">+ {formatCurrency(newAsset.tradeLevies)}</span>
-                    </div>
-                    <div className="flex items-center justify-between text-slate-400 text-[11px] pb-1 border-b border-slate-800/60 font-mono">
-                      <span>+ Broker Commission Fee</span>
-                      <span className="text-amber-400">+ {formatCurrency(newAsset.brokerCommission)}</span>
-                    </div>
-                    <div className="flex items-center justify-between pt-1">
-                      <div>
-                        <span className="text-xs font-bold text-white uppercase tracking-wider block">Net Settlement Value (Total Cost Basis)</span>
-                        <span className="text-[10px] text-emerald-400 font-mono">
-                          Effective All-In Cost / Share: GH₵{newAsset.costBasis?.toFixed(4)}
-                        </span>
-                      </div>
-                      <span className="text-lg font-bold text-emerald-400 font-mono">{formatCurrency(newAsset.totalCostBasis)}</span>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Section 4: Current Valuation & Price Updates */}
-                <div className="p-4 bg-slate-950/60 border border-slate-800 rounded-2xl space-y-4">
-                  <div className="flex items-center justify-between border-b border-slate-800/80 pb-2">
-                    <span className="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-1.5">
-                      <TrendingUp className="w-3.5 h-3.5 text-emerald-400" />
-                      4. Current Valuation & Performance
+                {/* 8. Net Value (Total Settlement Value) */}
+                <div className="p-4 bg-gradient-to-r from-emerald-950/30 via-slate-950 to-slate-950 border border-emerald-500/20 rounded-2xl flex items-center justify-between">
+                  <div>
+                    <span className="text-xs font-bold text-white uppercase tracking-wider block">Net Value (Total Investment Cost)</span>
+                    <span className="text-[11px] text-slate-400 font-mono mt-0.5 block">
+                      Trade Consideration + Trade Levies + Broker Commission
                     </span>
                   </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                    <div className="space-y-1.5">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Current Price per Share (GH₵)</label>
-                      <input 
-                        type="number"
-                        step="0.0001"
-                        value={newAsset.currentPrice || ''}
-                        onChange={(e) => handleContractNoteChange('currentPrice', Number(e.target.value))}
-                        placeholder="e.g. 6.80"
-                        className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-white font-mono text-sm focus:border-emerald-500 outline-none"
-                      />
-                    </div>
-
-                    <div className="space-y-1.5">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Current Market Value (GH₵)</label>
-                      <div className="w-full bg-slate-900/90 border border-slate-800 rounded-xl px-3 py-2 text-emerald-400 font-mono font-bold text-sm">
-                        {formatCurrency(newAsset.marketValue)}
-                      </div>
-                    </div>
-
-                    <div className="space-y-1.5">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Unrealized Gain / Loss</label>
-                      <div className={cn(
-                        "w-full bg-slate-900/90 border border-slate-800 rounded-xl px-3 py-2 font-mono font-bold text-sm flex items-center justify-between",
-                        (newAsset.marketValue - newAsset.totalCostBasis) >= 0 ? "text-emerald-400" : "text-red-400"
-                      )}>
-                        <span>{formatCurrency(newAsset.marketValue - newAsset.totalCostBasis)}</span>
-                        <span className="text-[10px]">
-                          {newAsset.totalCostBasis > 0 ? (((newAsset.marketValue - newAsset.totalCostBasis) / newAsset.totalCostBasis) * 100).toFixed(2) : '0.00'}%
-                        </span>
-                      </div>
-                    </div>
+                  <div className="text-right">
+                    <span className="text-xl font-bold text-emerald-400 font-mono block">
+                      {formatCurrency(newAsset.totalCostBasis || (newAsset.tradeConsideration + (newAsset.tradeLevies || 0) + (newAsset.brokerCommission || 0)))}
+                    </span>
+                    <span className="text-[10px] text-emerald-500/80 font-mono">
+                      Avg Unit Cost: GH₵{newAsset.costBasis?.toFixed(4) || newAsset.tradePrice?.toFixed(4)}
+                    </span>
                   </div>
                 </div>
 
                 {/* Submit Controls */}
-                <div className="flex items-center justify-end gap-3 pt-4 border-t border-slate-800">
-                  <button 
+                <div className="flex items-center justify-end gap-3 pt-2">
+                  <button
                     type="button"
                     onClick={() => setIsAddModalOpen(false)}
-                    className="px-5 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold rounded-xl transition-all"
+                    className="px-5 py-2.5 rounded-xl border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors font-medium"
                   >
                     Cancel
                   </button>
-                  <button 
+                  <button
                     type="submit"
-                    disabled={isAdding || (modalSelectedAccount && modalSelectedAccount.cashBalance < (newAsset.totalCostBasis || 0))}
-                    className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold rounded-xl transition-all shadow-lg shadow-emerald-600/30 flex items-center gap-2"
+                    disabled={isAdding}
+                    className="bg-emerald-600 hover:bg-emerald-500 text-white px-6 py-2.5 rounded-xl font-bold transition-all shadow-lg shadow-emerald-600/20 disabled:opacity-50 flex items-center gap-2 text-xs"
                   >
                     {isAdding ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
-                    {isAdding ? 'Recording Trade...' : 'Add Contract Note Asset'}
+                    Record Trade Purchase
                   </button>
                 </div>
               </form>
