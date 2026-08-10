@@ -421,14 +421,16 @@ export async function commitInvestorBulkBatch(
 
     rowsToCommit.forEach(row => {
       const inv = createdOrMatchedInvestorsMap.get(row.rowNumber);
-      if (!inv || !row.transactionDate || !row.applicableNav || !row.amount || row.amount <= 0) {
-        return;
-      }
-
-      // Determine units to issue based on admin discrepancy choice
+      
       const unitsToUse = (row.discrepancyAction === 'ACCEPT_IMPORTED' && row.importedUnits && row.importedUnits > 0)
         ? row.importedUnits
-        : row.calculatedUnits || roundUnits(row.amount / row.applicableNav);
+        : (row.calculatedUnits || row.importedUnits || (row.amount && row.applicableNav ? roundUnits(row.amount / row.applicableNav) : 0));
+
+      const amountToUse = row.amount || (unitsToUse && row.applicableNav ? roundMoney(unitsToUse * row.applicableNav) : 0);
+
+      if (!inv || !row.transactionDate || !row.applicableNav || (unitsToUse <= 0 && amountToUse <= 0)) {
+        return;
+      }
 
       recordsToPost.push({
         id: `STG-INV-${row.rowNumber}-${Date.now()}`,
@@ -442,8 +444,8 @@ export async function commitInvestorBulkBatch(
         matchStatus: 'MATCHED',
         rawType: 'Subscription',
         normalisedType: 'Subscription',
-        rawAmount: row.amount,
-        grossAmount: row.amount,
+        rawAmount: amountToUse,
+        grossAmount: amountToUse,
         applicableNav: row.applicableNav,
         calculatedUnits: unitsToUse,
         status: 'READY',

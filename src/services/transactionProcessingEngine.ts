@@ -427,7 +427,15 @@ export async function postTransactionBatch(
   const postedTransactionIds: string[] = [];
 
   for (const record of recordsToPost) {
-    if (!record.matchedInvestorId || !record.validatedDate || !record.applicableNav || record.rawAmount <= 0) {
+    const unitsToIssue = (record.calculatedUnits && record.calculatedUnits > 0)
+      ? record.calculatedUnits
+      : (record.rawAmount && record.applicableNav ? roundUnits(record.rawAmount / record.applicableNav) : 0);
+
+    const grossAmount = (record.rawAmount && record.rawAmount > 0)
+      ? record.rawAmount
+      : roundMoney(unitsToIssue * (record.applicableNav || 1.0000));
+
+    if (!record.matchedInvestorId || !record.validatedDate || !record.applicableNav || (unitsToIssue <= 0 && grossAmount <= 0)) {
       failureCount++;
       continue;
     }
@@ -450,18 +458,12 @@ export async function postTransactionBatch(
         let realizedGainLoss = 0;
 
         if (record.normalisedType === 'Subscription' || record.normalisedType === 'BUY') {
-          const sub = calculateSubscription(
-            record.rawAmount,
-            record.applicableNav!,
-            investor.unitsOwned,
-            investor.totalInvestment
-          );
-          unitsDelta = (record.calculatedUnits && record.calculatedUnits > 0) ? record.calculatedUnits : sub.unitsIssued;
-          cashDelta = sub.grossAmount;
-          costBasisDelta = sub.grossAmount;
+          unitsDelta = unitsToIssue;
+          cashDelta = grossAmount;
+          costBasisDelta = grossAmount;
         } else if (record.normalisedType === 'Redemption' || record.normalisedType === 'SELL') {
           const red = calculateRedemption(
-            record.calculatedUnits || (record.rawAmount / record.applicableNav!),
+            unitsToIssue,
             investor.unitsOwned,
             investor.totalInvestment,
             record.applicableNav!
@@ -472,9 +474,9 @@ export async function postTransactionBatch(
           costBasisReduction = red.costBasisReduction;
           realizedGainLoss = red.realizedGainLoss;
         } else if (record.normalisedType === 'Dividend' || record.normalisedType === 'Interest') {
-          cashDelta = record.rawAmount; // Increases fund cash
+          cashDelta = grossAmount; // Increases fund cash
         } else if (record.normalisedType === 'ManagementFee' || record.normalisedType === 'AdminFee') {
-          cashDelta = -record.rawAmount; // Reduces fund cash
+          cashDelta = -grossAmount; // Reduces fund cash
         }
 
         // 1. Update Investor Document
