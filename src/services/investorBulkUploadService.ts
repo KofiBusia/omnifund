@@ -51,26 +51,19 @@ export function downloadInvestorCsvTemplate(mode: InvestorImportMode = 'MASTER_O
       ['INV-000102', 'Individual', 'Abena Osei', 'Abena', '', 'Osei', 'abena.osei@example.com', '+233200003344', 'Kumasi Ghana', '1990-11-20', 'Passport', 'G1234567', 'verified'],
       ['INV-000103', 'Corporate', 'Kofi Holdings Ltd', 'Kofi', '', 'Holdings', 'info@kofiholdings.com', '+233302005566', 'Airport City Accra', '', 'Business Reg', 'CS-98765432', 'verified']
     ];
-  } else {
     filename = 'OmniFund_Investor_Financial_Template_v1.0.csv';
     headers = [
-      'Investor ID',
-      'Investor Type',
       'Full Name',
       'Email',
-      'Phone',
-      'Fund Ticker',
-      'Account Type',
-      'Transaction Date',
+      'Date',
+      'Amount',
       'Transaction Type',
-      'Amount (GHS)',
-      'Currency',
-      'Imported Units (Optional)'
+      'Fund Ticker'
     ];
     sampleRows = [
-      ['INV-000101', 'Individual', 'Kwame Mensah', 'kwame.mensah@example.com', '+233240001122', 'OGF', 'Growth', '2026-04-24', 'Subscription', '1000.00', 'GHS', '8000.0000'],
-      ['INV-000102', 'Individual', 'Abena Osei', 'abena.osei@example.com', '+233200003344', 'OGF', 'Growth', '2026-04-24', 'Subscription', '500.00', 'GHS', '4000.0000'],
-      ['INV-000103', 'Corporate', 'Kofi Holdings Ltd', 'info@kofiholdings.com', '+233302005566', 'OBF', 'Balanced', '2026-04-24', 'Subscription', '5000.00', 'GHS', '50000.0000']
+      ['Kwame Mensah', 'kwame.mensah@example.com', '2026-04-24', '1000.00', 'Subscription', 'OGEF'],
+      ['Abena Osei', 'abena.osei@example.com', '2026-04-24', '500.00', 'Subscription', 'OGEF'],
+      ['Kofi Holdings Ltd', 'info@kofiholdings.com', '2026-04-24', '5000.00', 'Subscription', 'OGEF']
     ];
   }
 
@@ -215,11 +208,22 @@ export function analyseInvestorBulkCsv(
     }
 
     // Financial & Unit Processing (Extracted for both MASTER_ONLY and MASTER_AND_INVESTMENT modes)
-    let fundTicker = extractRowField(row, ['Fund Ticker', 'Fund', 'Ticker', 'Scheme']);
+    let fundTicker = extractRowField(row, ['Fund Ticker', 'Fund', 'Ticker', 'Fund Code', 'Code', 'Scheme']);
+    let rowTargetAccount = targetAccount;
+    if (fundTicker) {
+      const matchedAcc = accounts.find(a => 
+        (a.ticker && a.ticker.toUpperCase() === fundTicker.toUpperCase()) || 
+        (a.code && a.code.toUpperCase() === fundTicker.toUpperCase())
+      );
+      if (matchedAcc) {
+        rowTargetAccount = matchedAcc;
+      }
+    }
+
     let accountType = extractRowField(row, ['Account Type', 'Share Class']) || 'Growth';
     const rawTxDate = extractRowField(row, ['Transaction Date', 'Date', 'Txn Date', 'Effective Date', 'Inception Date', 'Registration Date', 'Joining Date', 'Value Date']);
-    const rawTxType = extractRowField(row, ['Transaction Type', 'Type', 'Action']);
-    const rawAmountVal = extractRowField(row, ['Amount (GHS)', 'Amount', 'Contribution', 'Deposit', 'Subscription Amount', 'Investment Amount', 'Total Investment', 'Value', 'Market Value', 'Initial Capital', 'Capital', 'Balance (GHS)', 'Financial Balance']);
+    const rawTxType = extractRowField(row, ['Transaction Type', 'Type', 'Action', 'Txn Type']);
+    const rawAmountVal = extractRowField(row, ['Amount', 'Amount (GHS)', 'Contribution', 'Deposit', 'Subscription Amount', 'Investment Amount', 'Total Investment', 'Value', 'Market Value', 'Initial Capital', 'Capital', 'Balance (GHS)', 'Financial Balance']);
     const rawUnitsVal = extractRowField(row, ['Imported Units (Optional)', 'Imported Units', 'Units', 'Units Owned', 'Unit Balance', 'Total Units', 'Shares', 'Share Count', 'Initial Units', 'Holding Units', 'Units Held', 'Share Balance']);
 
     let transactionDate = parseAndNormaliseDate(rawTxDate) || new Date().toISOString().split('T')[0];
@@ -228,9 +232,9 @@ export function analyseInvestorBulkCsv(
     let parsedAmount = Number(String(rawAmountVal || 0).replace(/[^0-9.-]+/g, ''));
     let parsedUnits = rawUnitsVal ? Number(String(rawUnitsVal).replace(/[^0-9.-]+/g, '')) : undefined;
 
-    const accId = targetAccount?.id || 'acc1';
-    const navLookup = resolveHistoricalNavForDate(accId, transactionDate, valuations, targetAccount?.nav || 1.0000);
-    let applicableNav: number | undefined = navLookup?.nav || targetAccount?.nav || 1.0000;
+    const accId = rowTargetAccount?.id || targetAccount?.id || 'acc1';
+    const navLookup = resolveHistoricalNavForDate(accId, transactionDate, valuations, rowTargetAccount?.nav || targetAccount?.nav || 1.0000);
+    let applicableNav: number | undefined = navLookup?.nav || rowTargetAccount?.nav || targetAccount?.nav || 1.0000;
 
     // Smart unit/amount inter-derivation
     if ((isNaN(parsedAmount) || parsedAmount <= 0) && parsedUnits !== undefined && !isNaN(parsedUnits) && parsedUnits > 0) {
@@ -298,8 +302,8 @@ export function analyseInvestorBulkCsv(
       matchConfidence,
       matchStatus,
       matchReason,
-      fundTicker: fundTicker || targetAccount?.ticker,
-      targetAccountId: targetAccount?.id,
+      fundTicker: fundTicker || rowTargetAccount?.ticker || targetAccount?.ticker,
+      targetAccountId: rowTargetAccount?.id || targetAccount?.id,
       accountType,
       transactionDate: transactionDate || undefined,
       transactionType,
