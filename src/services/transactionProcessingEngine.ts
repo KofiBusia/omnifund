@@ -216,11 +216,8 @@ export function normaliseTransactionType(rawType: string): TransactionType {
   if (!rawType) return 'Subscription';
   const clean = rawType.trim().toUpperCase();
 
-  if (['BUY', 'CONTRIBUTION', 'DEPOSIT', 'SUBSCRIPTION', 'SUB', 'INVESTMENT'].includes(clean)) {
+  if (['BUY', 'CONTRIBUTION', 'DEPOSIT', 'SUBSCRIPTION', 'SUB', 'INVESTMENT', 'SELL', 'WITHDRAWAL', 'REDEMPTION', 'RED', 'PAYOUT'].includes(clean)) {
     return 'Subscription';
-  }
-  if (['SELL', 'WITHDRAWAL', 'REDEMPTION', 'RED', 'PAYOUT'].includes(clean)) {
-    return 'Redemption';
   }
   if (['DIVIDEND', 'DIV'].includes(clean)) return 'Dividend';
   if (['INTEREST', 'INT'].includes(clean)) return 'Interest';

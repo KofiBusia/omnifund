@@ -242,7 +242,7 @@ export function analyseInvestorBulkCsv(
     const rawUnitsVal = extractRowField(row, ['Imported Units (Optional)', 'Imported Units', 'Units', 'Units Owned', 'Unit Balance', 'Total Units', 'Shares', 'Share Count', 'Initial Units', 'Holding Units', 'Units Held', 'Share Balance']);
 
     let transactionDate = parseAndNormaliseDate(rawTxDate) || new Date().toISOString().split('T')[0];
-    let transactionType: StagedInvestorRow['transactionType'] = (rawTxType?.toLowerCase().includes('red') || rawTxType?.toLowerCase().includes('sell')) ? 'Redemption' : 'Subscription';
+    let transactionType: StagedInvestorRow['transactionType'] = 'Subscription';
     
     let parsedAmount = Number(String(rawAmountVal || 0).replace(/[^0-9.-]+/g, ''));
     let parsedUnits = rawUnitsVal ? Number(String(rawUnitsVal).replace(/[^0-9.-]+/g, '')) : undefined;

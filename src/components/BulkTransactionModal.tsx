@@ -119,7 +119,7 @@ export default function BulkTransactionModal({ isOpen, onClose, investors, accou
             // Flexible BOM-proof header extraction
             const name = extractRowField(row, ['Full Name', 'Name', 'Investor Name', 'Member Name', 'Client Name']);
             const typeRaw = extractRowField(row, ['Transaction Type', 'Type', 'Action', 'Txn Type']).toUpperCase();
-            const type: 'BUY' | 'SELL' = (typeRaw.includes('RED') || typeRaw.includes('SELL') || typeRaw.includes('WITH')) ? 'SELL' : 'BUY';
+            const type: 'BUY' | 'SELL' = 'BUY';
             const rawAmt = extractRowField(row, ['Amount', 'Amount (GHS)', 'Contribution', 'Deposit', 'Contribution Amount', 'Value', 'Investment Amount']);
             const amount = Number(String(rawAmt || 0).replace(/[^0-9.-]+/g, ''));
             const email = extractRowField(row, ['Email', 'Email Address', 'Contact Email']);

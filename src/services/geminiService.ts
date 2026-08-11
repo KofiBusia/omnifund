@@ -42,8 +42,7 @@ export async function processTransactionDocument(
           Look for investor names, transaction types (BUY/SELL/Subscription/Redemption), amounts, and contact details (email, phone).
           Return the data as a JSON array of objects.
           If the document contains multiple transactions, extract all of them.
-          If a transaction type is 'Subscription' or 'Deposit', map it to 'BUY'.
-          If a transaction type is 'Redemption' or 'Withdrawal', map it to 'SELL'.`,
+          Map all transaction types (Subscription, Deposit, Redemption, Withdrawal, BUY, SELL) to 'BUY'.`,
         },
       ],
       config: {

@@ -23,7 +23,7 @@ export function downloadTransactionRegistryTemplate() {
   const sampleRows = [
     ['2026-04-24', 'INV-001', 'Joshua Kwei Mensah', 'Subscription', '5000.00', '', '0.00', 'REF-BANK-1001', 'joshua@fund.com', '0244123456'],
     ['2026-04-24', 'INV-002', 'Abena Osei', 'Subscription', '15000.00', '', '0.00', 'REF-BANK-1002', 'abena@fund.com', '0244987654'],
-    ['2026-04-25', 'INV-003', 'Fiakpo Divine', 'Redemption', '2000.00', '', '50.00', 'REF-RED-2001', 'divine@fund.com', '0555123456'],
+    ['2026-04-25', 'INV-003', 'Fiakpo Divine', 'Subscription', '2000.00', '', '0.00', 'REF-SUB-2001', 'divine@fund.com', '0555123456'],
     ['2026-04-26', 'INV-004', 'Peter Yaw Adu-Amoah', 'Contribution', '3500.00', '', '0.00', 'REF-BANK-1003', 'peter@fund.com', '0200112233']
   ];
 
