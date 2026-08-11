@@ -21,6 +21,16 @@ export default defineConfig(({mode}) => {
     },
     server: {
       hmr: process.env.DISABLE_HMR !== 'true',
+      proxy: {
+        '/api/afx-gse': {
+          target: 'https://afx.kwayisi.org',
+          changeOrigin: true,
+          rewrite: (path) => '/gse/',
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+          }
+        }
+      }
     },
   };
 });

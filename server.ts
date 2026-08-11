@@ -67,6 +67,26 @@ async function startServer() {
       res.json({ status: 'ok', timestamp: new Date().toISOString() });
     });
 
+    // GSE Realtime AFX Proxy Route
+    app.get('/api/afx-gse', async (req, res) => {
+      try {
+        const response = await fetch('https://afx.kwayisi.org/gse/', {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+          }
+        });
+        if (!response.ok) {
+          return res.status(response.status).send('Failed to fetch from AFX');
+        }
+        const html = await response.text();
+        res.setHeader('Content-Type', 'text/html');
+        res.send(html);
+      } catch (err: any) {
+        console.error('Error in AFX proxy route:', err);
+        res.status(500).json({ error: err.message || 'AFX fetch error' });
+      }
+    });
+
   // --- Google Auth Routes ---
   app.get('/api/auth/google/url', (req, res) => {
     const url = oauth2Client.generateAuthUrl({

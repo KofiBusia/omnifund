@@ -34,6 +34,7 @@ import { addDoc, collection, doc, updateDoc, deleteDoc, runTransaction, incremen
 import { db } from '../firebase';
 import { handleFirestoreError, OperationType } from '../lib/utils';
 import { runGlobalValuation, revertAssetValuation, recalculateAccountValuation } from '../services/valuationService';
+import { syncRealtimeAFXPrices, AFXSyncResult } from '../services/afxSyncService';
 import { calculateAssetDisposal, calculateNetAssets, calculateNavPerUnit, roundMoney } from '../services/fundAccountingEngine';
 import { AssetValuation } from '../types';
 import { generatePortfolioStatementPDF } from '../lib/pdfGenerator';
@@ -320,12 +321,32 @@ export default function PortfolioManagement({ portfolio, fund, accounts, role }:
     }
   };
 
+  const [lastAfxSync, setLastAfxSync] = useState<AFXSyncResult | null>(null);
+
   const handleFetchPrices = async () => {
     setIsRefreshing(true);
+    const toastId = toast.loading('Connecting to Ghana Stock Exchange (afx.kwayisi.org)...');
     try {
+      const tickers = Array.from(new Set(portfolio.map(a => a.ticker).filter(Boolean)));
+      const afxRes = await syncRealtimeAFXPrices(tickers);
+      setLastAfxSync(afxRes);
+
       await runGlobalValuation();
-    } catch (error) {
+
+      const updatedCount = Object.keys(afxRes.prices || {}).length;
+      if (afxRes.success && updatedCount > 0) {
+        toast.success(
+          `⚡ Live AFX Sync Success! Updated ${updatedCount} asset price(s) from Ghana Stock Exchange.${afxRes.gseIndex ? ` [GSE-CI: ${afxRes.gseIndex}]` : ''}`,
+          { id: toastId }
+        );
+      } else if (afxRes.success) {
+        toast.success('GSE Live Market connected successfully — portfolio assets up to date.', { id: toastId });
+      } else {
+        toast.info('Completed global valuation check (AFX fallback used existing values).', { id: toastId });
+      }
+    } catch (error: any) {
       console.error("Failed to refresh prices", error);
+      toast.error(`AFX Sync error: ${error?.message || 'Failed to refresh prices'}`, { id: toastId });
     } finally {
       setIsRefreshing(false);
     }
@@ -559,10 +580,17 @@ export default function PortfolioManagement({ portfolio, fund, accounts, role }:
             <h2 className="text-3xl font-bold text-white">Portfolio Management</h2>
             <div className="flex items-center gap-1.5 bg-emerald-500/10 text-emerald-500 px-2 py-0.5 rounded-full border border-emerald-500/20">
               <div className="w-1 h-1 bg-emerald-500 rounded-full animate-pulse" />
-              <span className="text-[10px] font-bold uppercase tracking-wider">Live</span>
+              <span className="text-[10px] font-bold uppercase tracking-wider">AFX GSE Live</span>
             </div>
+            {lastAfxSync?.gseIndex && (
+              <span className="text-[10px] font-mono font-bold bg-slate-900 border border-slate-800 text-emerald-400 px-2.5 py-0.5 rounded-full">
+                GSE-CI: {lastAfxSync.gseIndex}
+              </span>
+            )}
           </div>
-          <p className="text-slate-400 mt-1">Manage fund assets and security holdings</p>
+          <p className="text-slate-400 mt-1">
+            Manage fund assets and security holdings · Realtime pricing synced via afx.kwayisi.org
+          </p>
         </div>
         <div className="flex flex-wrap items-center gap-4">
           {accounts.length > 0 && (

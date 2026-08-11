@@ -1,6 +1,7 @@
 import { collection, getDocs, doc, getDoc, updateDoc, addDoc, serverTimestamp, query, where, deleteDoc, increment } from 'firebase/firestore';
 import { db } from '../firebase';
 import { fetchGSEPrices } from '../lib/gemini';
+import { syncRealtimeAFXPrices } from './afxSyncService';
 import { 
   Asset, 
   InvestmentAccount, 
@@ -231,13 +232,19 @@ export const runGlobalValuation = async () => {
     const assetsSnapshot = await getDocs(collection(db, 'portfolio'));
     const allAssets = assetsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Asset));
 
-    // 3. Get unique tickers & attempt to fetch prices
+    // 3. Get unique tickers & attempt to fetch prices from AFX Kwayisi Realtime Sync
     const tickers = Array.from(new Set(allAssets.map(a => a.ticker).filter(Boolean)));
     let prices: Record<string, number> = {};
     if (tickers.length > 0) {
       try {
-        const fetched = await fetchGSEPrices(tickers);
-        if (fetched) prices = fetched;
+        const afxRes = await syncRealtimeAFXPrices(tickers);
+        if (afxRes.success && afxRes.prices) {
+          Object.entries(afxRes.prices).forEach(([tk, stockData]) => {
+            if (stockData.price > 0) {
+              prices[tk] = stockData.price;
+            }
+          });
+        }
       } catch (e) {
         console.warn("Automated market price fetch error (continuing with existing values):", e);
       }
