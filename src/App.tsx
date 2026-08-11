@@ -213,25 +213,35 @@ export default function App() {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       setUser(user);
       if (user) {
+        const isSuperAdmin = user.email?.toLowerCase().trim() === 'emmanuelagbanyo8@gmail.com';
         const isDemoUser = user.email?.includes('demo') || user.isAnonymous || false;
-        try {
-          const userDoc = await getDoc(doc(db, 'users', user.uid));
-          if (userDoc.exists()) {
-            const data = userDoc.data();
-            setRole((data.role as UserRoleType) || 'admin');
-            setIsDemoMode(!!data.isDemo || isDemoUser);
-            if (data.theme === 'light' || data.theme === 'dark') {
-              setTheme(data.theme);
+
+        if (isSuperAdmin) {
+          setRole('superadmin');
+          setIsDemoMode(false);
+          try {
+            await setDoc(doc(db, 'users', user.uid), { role: 'superadmin', email: user.email, isDemo: false }, { merge: true });
+          } catch {}
+        } else {
+          try {
+            const userDoc = await getDoc(doc(db, 'users', user.uid));
+            if (userDoc.exists()) {
+              const data = userDoc.data();
+              setRole((data.role as UserRoleType) || 'admin');
+              setIsDemoMode(!!data.isDemo || isDemoUser);
+              if (data.theme === 'light' || data.theme === 'dark') {
+                setTheme(data.theme);
+              }
+            } else {
+              const newRole: UserRoleType = 'investor';
+              setRole(newRole);
+              setIsDemoMode(isDemoUser);
+              await setDoc(doc(db, 'users', user.uid), { role: newRole, email: user.email, isDemo: isDemoUser, theme: 'dark' });
             }
-          } else {
-            const newRole: UserRoleType = user.email === 'emmanuelagbanyo8@gmail.com' ? 'superadmin' : 'investor';
-            setRole(newRole);
+          } catch {
+            setRole(isDemoUser ? 'admin' : 'investor');
             setIsDemoMode(isDemoUser);
-            await setDoc(doc(db, 'users', user.uid), { role: newRole, email: user.email, isDemo: isDemoUser, theme: 'dark' });
           }
-        } catch {
-          setRole(isDemoUser ? 'admin' : 'investor');
-          setIsDemoMode(isDemoUser);
         }
       } else {
         setRole(null);
