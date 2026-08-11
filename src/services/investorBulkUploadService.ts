@@ -88,13 +88,23 @@ export function downloadInvestorCsvTemplate(mode: InvestorImportMode = 'MASTER_A
  * 2. Flexible Header Extraction & Alias Normalisation
  */
 export function extractRowField(row: Record<string, any>, aliases: string[]): string {
+  if (!row || typeof row !== 'object') return '';
+
+  const normalizedKeysMap = new Map<string, string>();
+  for (const key of Object.keys(row)) {
+    const cleanKey = key.replace(/^\uFEFF/, '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (cleanKey && !normalizedKeysMap.has(cleanKey)) {
+      normalizedKeysMap.set(cleanKey, key);
+    }
+  }
+
   for (const alias of aliases) {
-    for (const key of Object.keys(row)) {
-      if (key.trim().toLowerCase() === alias.trim().toLowerCase()) {
-        const val = row[key];
-        if (val !== undefined && val !== null) {
-          return String(val).trim();
-        }
+    const cleanAlias = alias.replace(/^\uFEFF/, '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (normalizedKeysMap.has(cleanAlias)) {
+      const originalKey = normalizedKeysMap.get(cleanAlias)!;
+      const val = row[originalKey];
+      if (val !== undefined && val !== null) {
+        return String(val).trim();
       }
     }
   }

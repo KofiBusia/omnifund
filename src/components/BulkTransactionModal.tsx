@@ -21,6 +21,7 @@ import { handleFirestoreError, OperationType, cn, formatCurrency, safeFormatDate
 import { processTransactionDocument, ExtractedTransaction } from '../services/geminiService';
 import { calculateSmartNavForDate, SmartNavResult } from '../services/smartNavEngine';
 import { downloadTransactionRegistryTemplate } from '../services/csvTemplateService';
+import { extractRowField } from '../services/investorBulkUploadService';
 
 interface BulkTransactionModalProps {
   isOpen: boolean;
@@ -43,7 +44,7 @@ interface ProcessedRow extends BulkRow {
   investor?: Investor;
   isNew: boolean;
   error?: string;
-  status: 'pending' | 'valid' | 'invalid' | 'processing' | 'success' | 'error';
+  status: 'valid' | 'invalid';
 }
 
 export default function BulkTransactionModal({ isOpen, onClose, investors, accounts, valuations, portfolio = [] }: BulkTransactionModalProps) {
@@ -115,15 +116,14 @@ export default function BulkTransactionModal({ isOpen, onClose, investors, accou
         complete: (results) => {
           const rows = results.data as any[];
           const validated = rows.map(row => {
-            // Flexible header mapping
-            const name = (row['FULL NAME'] || row.name || row['Investor Name'] || row.Investor)?.trim();
-            const typeRaw = (row.TYPE || row.type || row['Transaction Type'])?.trim().toUpperCase();
-            const type = (typeRaw === 'BUY' || typeRaw === 'SELL' || typeRaw === 'SUBSCRIPTION' || typeRaw === 'REDEMPTION') 
-              ? (typeRaw === 'REDEMPTION' ? 'SELL' : (typeRaw === 'SUBSCRIPTION' ? 'BUY' : typeRaw)) 
-              : 'BUY';
-            const amount = Number(String(row['CONTRIBUTION AMOUNT'] || row.amount || row.Amount || row.Value).replace(/[^0-9.-]+/g,""));
-            const email = (row['Email Address'] || row.email || row.Email)?.trim();
-            const phone = (row['Phone Number'] || row.phone || row.Phone || row.Contact)?.trim();
+            // Flexible BOM-proof header extraction
+            const name = extractRowField(row, ['Full Name', 'Name', 'Investor Name', 'Member Name', 'Client Name']);
+            const typeRaw = extractRowField(row, ['Transaction Type', 'Type', 'Action', 'Txn Type']).toUpperCase();
+            const type: 'BUY' | 'SELL' = (typeRaw.includes('RED') || typeRaw.includes('SELL') || typeRaw.includes('WITH')) ? 'SELL' : 'BUY';
+            const rawAmt = extractRowField(row, ['Amount', 'Amount (GHS)', 'Contribution', 'Deposit', 'Contribution Amount', 'Value', 'Investment Amount']);
+            const amount = Number(String(rawAmt || 0).replace(/[^0-9.-]+/g, ''));
+            const email = extractRowField(row, ['Email', 'Email Address', 'Contact Email']);
+            const phone = extractRowField(row, ['Phone', 'Phone Number', 'Mobile', 'Contact Phone']);
 
             return validateRow({ name, type, amount, email, phone });
           });
@@ -168,9 +168,10 @@ export default function BulkTransactionModal({ isOpen, onClose, investors, accou
   };
 
   const validateRow = React.useCallback((row: BulkRow, targetAccountId = selectedAccountId, nav = manualNav): ProcessedRow => {
-    // STRICT ACCOUNT ISOLATION: Only match investors belonging exclusively to targetAccountId
-    const accountInvestors = investors.filter(i => i.accountId === targetAccountId);
-    const investor = accountInvestors.find(i => i.name.toLowerCase() === row.name?.toLowerCase());
+    const investor = investors.find(i => 
+      (row.name && i.name.toLowerCase() === row.name?.toLowerCase()) ||
+      (row.email && i.email && i.email.toLowerCase() === row.email.toLowerCase())
+    );
     const isNew = !investor;
 
     let error = '';
