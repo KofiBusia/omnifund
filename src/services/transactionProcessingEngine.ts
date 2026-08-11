@@ -1,4 +1,4 @@
-import { doc, collection, runTransaction, increment, serverTimestamp } from 'firebase/firestore';
+import { doc, collection, writeBatch, increment } from 'firebase/firestore';
 import { db } from '../firebase';
 import { 
   Transaction, 
@@ -483,14 +483,16 @@ export async function postTransactionBatch(
     totalFundUnitsDelta += unitsDelta;
     totalFundCashDelta += cashDelta;
 
-    // 1. Update Investor Document
+    // 1. Update Investor Document (unitsOwned, totalInvestment, currentValue)
     const investorRef = doc(db, 'investors', investor.id);
+    const newCurrentValue = roundMoney((investor.unitsOwned + unitsDelta) * (record.applicableNav || 1));
     batchOperations.push({
       type: 'update',
       ref: investorRef,
       data: {
         unitsOwned: increment(unitsDelta),
         totalInvestment: increment(costBasisDelta),
+        currentValue: newCurrentValue,
         ...(realizedGainLoss !== 0 ? { realizedGainLoss: increment(realizedGainLoss) } : {})
       }
     });

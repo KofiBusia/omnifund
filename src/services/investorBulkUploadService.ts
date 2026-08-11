@@ -222,10 +222,14 @@ export function analyseInvestorBulkCsv(
     let fundTicker = extractRowField(row, ['Fund Ticker', 'Fund', 'Ticker', 'Fund Code', 'Code', 'Scheme']);
     let rowTargetAccount = targetAccount;
     if (fundTicker) {
-      const matchedAcc = accounts.find(a => 
-        (a.ticker && a.ticker.toUpperCase() === fundTicker.toUpperCase()) || 
-        (a.code && a.code.toUpperCase() === fundTicker.toUpperCase())
-      );
+      // Normalize ticker: strip underscores, spaces, dashes, lowercase for fuzzy matching
+      const normTicker = fundTicker.toUpperCase().replace(/[_\s-]/g, '');
+      const matchedAcc = accounts.find(a => {
+        const normA = (a.ticker || '').toUpperCase().replace(/[_\s-]/g, '');
+        const normCode = (a.code || '').toUpperCase().replace(/[_\s-]/g, '');
+        const normName = (a.name || '').toUpperCase().replace(/[_\s-]/g, '');
+        return normA === normTicker || normCode === normTicker || normName.includes(normTicker) || normTicker.includes(normA);
+      });
       if (matchedAcc) {
         rowTargetAccount = matchedAcc;
       }
@@ -352,7 +356,9 @@ export function analyseInvestorBulkCsv(
 }
 
 /**
- * 4. Stage 2: Controlled Sequential Batch Commitment Engine
+ * 4. Stage 2: Controlled Batch Commitment Engine
+ * Handles BOTH new investor creation AND transactions for existing investors.
+ * When an investor already exists, only the transaction/unit update is applied.
  */
 export async function commitInvestorBulkBatch(
   batch: StagedInvestorBatch,
@@ -373,10 +379,11 @@ export async function commitInvestorBulkBatch(
   let portalInvitationsSent = 0;
   const postedTransactionIds: string[] = [];
 
-  const createdOrMatchedInvestorsMap = new Map<number, Investor>();
+  // Map from rowNumber -> the resolved Investor object (either new or existing)
+  const resolvedInvestorsMap = new Map<number, Investor>();
   const newInvestorsToSet: { ref: any; data: Investor }[] = [];
 
-  // PHASE 1: Master Investor Creation & Account Linkage
+  // PHASE 1: Resolve each row to either an EXISTING investor or a NEW investor
   for (const row of rowsToCommit) {
     if (row.status === 'ERROR') {
       failedRowsCount++;
@@ -386,30 +393,49 @@ export async function commitInvestorBulkBatch(
     try {
       let activeInvestor: Investor | undefined = undefined;
 
+      // First: check if row already matched an existing investor
       if (row.matchedInvestorId) {
         activeInvestor = existingInvestors.find(i => i.id === row.matchedInvestorId);
       }
 
+      // Second: try harder to find a match by email, phone or name
+      if (!activeInvestor && row.email) {
+        activeInvestor = existingInvestors.find(i => 
+          i.email && i.email.toLowerCase() === row.email!.toLowerCase()
+        );
+      }
+      if (!activeInvestor && row.phone) {
+        const cleanPhone = row.phone.replace(/[^0-9]/g, '');
+        if (cleanPhone.length >= 8) {
+          activeInvestor = existingInvestors.find(i =>
+            i.phone && i.phone.replace(/[^0-9]/g, '') === cleanPhone
+          );
+        }
+      }
+      if (!activeInvestor && row.fullName) {
+        activeInvestor = existingInvestors.find(i =>
+          i.name.toLowerCase().trim() === row.fullName.toLowerCase().trim()
+        );
+      }
+
       if (!activeInvestor) {
-        // Generate database-safe unique Investor ID if missing
+        // Create a NEW investor document (no financial data yet — Phase 2 handles that)
         const newInvCode = row.investorId || `INV-${String(Math.floor(100000 + Math.random() * 900000))}`;
         const newInvRef = doc(collection(db, 'investors'));
-
-        const initialUnits = row.importedUnits || row.calculatedUnits || (row.amount && row.applicableNav ? roundUnits(row.amount / row.applicableNav) : 0);
-        const initialInvAmt = row.amount || (initialUnits && row.applicableNav ? roundMoney(initialUnits * row.applicableNav) : 0);
 
         const newInvData: Investor = {
           id: newInvRef.id,
           investorId: newInvCode,
           uid: '',
-          accountId: targetAccount.id,
+          accountId: row.targetAccountId || targetAccount.id,
           name: row.fullName,
           email: row.email || '',
           phone: row.phone || '',
           address: row.address || '',
-          unitsOwned: batch.importMode === 'MASTER_ONLY' ? initialUnits : 0,
-          totalInvestment: batch.importMode === 'MASTER_ONLY' ? initialInvAmt : 0,
-          currentValue: batch.importMode === 'MASTER_ONLY' ? roundMoney(initialUnits * (row.applicableNav || targetAccount.nav || 1)) : 0,
+          // Start at 0 — Phase 2 will increment these via Firestore increment()
+          unitsOwned: 0,
+          totalInvestment: 0,
+          currentValue: 0,
           kycStatus: (row.kycStatus === 'rejected' ? 'rejected' : row.kycStatus === 'pending' ? 'pending' : 'verified'),
           portalStatus: 'NOT_ENABLED',
           createdAt: new Date().toISOString(),
@@ -421,65 +447,89 @@ export async function commitInvestorBulkBatch(
         createdInvestorsCount++;
       }
 
-      createdOrMatchedInvestorsMap.set(row.rowNumber, activeInvestor);
+      resolvedInvestorsMap.set(row.rowNumber, activeInvestor);
     } catch (err) {
-      console.error(`Failed to create investor master record for row ${row.rowNumber}:`, err);
+      console.error(`Failed to resolve investor for row ${row.rowNumber}:`, err);
       failedRowsCount++;
     }
   }
 
-  // Commit Phase 1 in high-speed write batches (max 400 operations per batch)
+  // Commit Phase 1 new investor docs in write batches (max 400 per batch)
   if (newInvestorsToSet.length > 0) {
     const BATCH_SIZE = 400;
     for (let i = 0; i < newInvestorsToSet.length; i += BATCH_SIZE) {
       const chunk = newInvestorsToSet.slice(i, i + BATCH_SIZE);
       const batchOp = writeBatch(db);
-      chunk.forEach(item => {
-        batchOp.set(item.ref, item.data);
-      });
+      chunk.forEach(item => batchOp.set(item.ref, item.data));
       await batchOp.commit();
     }
   }
 
-  // PHASE 2: Financial Investment Subscriptions via Authoritative Transaction Engine
-  if (batch.importMode === 'MASTER_AND_INVESTMENT') {
+  // PHASE 2: Post financial transactions for ALL rows (new AND existing investors)
+  // importMode check: MASTER_AND_INVESTMENT processes subscriptions;
+  // MASTER_ONLY with amount data also processes (smart fallback)
+  const hasFinancialData = rowsToCommit.some(r => (r.amount && r.amount > 0) || (r.calculatedUnits && r.calculatedUnits > 0) || (r.importedUnits && r.importedUnits > 0));
+
+  if (batch.importMode === 'MASTER_AND_INVESTMENT' || hasFinancialData) {
     const recordsToPost: StagedTransactionRecord[] = [];
 
     rowsToCommit.forEach(row => {
-      const inv = createdOrMatchedInvestorsMap.get(row.rowNumber);
-      
+      if (row.status === 'ERROR') return;
+
+      const inv = resolvedInvestorsMap.get(row.rowNumber);
+      if (!inv) return; // Skip rows that failed investor resolution
+
+      // Determine units to use (prefer ACCEPT_IMPORTED if discrepancy action set, else calculated)
       const unitsToUse = (row.discrepancyAction === 'ACCEPT_IMPORTED' && row.importedUnits && row.importedUnits > 0)
         ? row.importedUnits
-        : (row.calculatedUnits || row.importedUnits || (row.amount && row.applicableNav ? roundUnits(row.amount / row.applicableNav) : 0));
+        : (row.calculatedUnits && row.calculatedUnits > 0
+            ? row.calculatedUnits
+            : (row.importedUnits && row.importedUnits > 0
+                ? row.importedUnits
+                : (row.amount && row.applicableNav && row.applicableNav > 0
+                    ? roundUnits(row.amount / row.applicableNav)
+                    : 0)));
 
-      const amountToUse = row.amount || (unitsToUse && row.applicableNav ? roundMoney(unitsToUse * row.applicableNav) : 0);
+      const amountToUse = (row.amount && row.amount > 0)
+        ? row.amount
+        : (unitsToUse > 0 && row.applicableNav && row.applicableNav > 0
+            ? roundMoney(unitsToUse * row.applicableNav)
+            : 0);
 
-      if (!inv || !row.transactionDate || !row.applicableNav || (unitsToUse <= 0 && amountToUse <= 0)) {
-        return;
-      }
+      // Must have EITHER units OR amount to proceed
+      if (unitsToUse <= 0 && amountToUse <= 0) return;
+
+      // Must have a valid NAV — default to 1.0000 if fund has no NAV set
+      const nav = (row.applicableNav && row.applicableNav > 0) ? row.applicableNav : (targetAccount.nav || 1.0000);
+      const validDate = row.transactionDate || new Date().toISOString().split('T')[0];
+      const txType = row.transactionType || 'Subscription';
 
       recordsToPost.push({
         id: `STG-INV-${row.rowNumber}-${Date.now()}`,
         batchId: batch.batchId,
-        rawDate: row.transactionDate,
-        validatedDate: row.transactionDate,
+        rawDate: validDate,
+        validatedDate: validDate,
         rawInvestor: row.fullName,
         matchedInvestorId: inv.id,
         matchedInvestorName: inv.name,
         matchConfidence: 100,
         matchStatus: 'MATCHED',
-        rawType: 'Subscription',
-        normalisedType: 'Subscription',
+        rawType: txType,
+        normalisedType: txType,
         rawAmount: amountToUse,
         grossAmount: amountToUse,
-        applicableNav: row.applicableNav,
-        calculatedUnits: unitsToUse,
+        applicableNav: nav,
+        calculatedUnits: unitsToUse > 0 ? unitsToUse : roundUnits(amountToUse / nav),
         status: 'READY',
         reference: `Import Batch ${batch.batchId} Row #${row.rowNumber}`
       });
     });
 
     if (recordsToPost.length > 0) {
+      // CRITICAL: Pass ALL resolved investors (both new and existing) to postTransactionBatch
+      // so it can find each investor by matchedInvestorId
+      const allInvestorsForPosting = Array.from(resolvedInvestorsMap.values());
+
       const postResult = await postTransactionBatch(
         {
           id: batch.batchId,
@@ -497,7 +547,7 @@ export async function commitInvestorBulkBatch(
         },
         recordsToPost,
         targetAccount,
-        Array.from(createdOrMatchedInvestorsMap.values())
+        allInvestorsForPosting
       );
 
       postedTransactionsCount = postResult.successCount;
@@ -505,11 +555,11 @@ export async function commitInvestorBulkBatch(
     }
   }
 
-  // PHASE 3: Portal Provisioning & Activation Links (Non-blocking Parallel Execution)
+  // PHASE 3: Portal Provisioning (Non-blocking Parallel)
   if (enablePortalAccess) {
-    const invList = Array.from(createdOrMatchedInvestorsMap.values()).filter(i => i.email && i.email.includes('@'));
+    const invList = Array.from(resolvedInvestorsMap.values()).filter(i => i.email && i.email.includes('@'));
     const provPromises = invList.map(inv => approveInvestorAndEnablePortal(inv.id, 'Bulk Import Auto-Provision').catch(err => {
-      console.warn(`Portal provisioning email failed for ${inv.email}:`, err);
+      console.warn(`Portal provisioning failed for ${inv.email}:`, err);
       return null;
     }));
     const results = await Promise.allSettled(provPromises);
