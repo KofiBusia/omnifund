@@ -39,8 +39,10 @@ export interface FirestoreErrorInfo {
 }
 
 export function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const rawMsg = error instanceof Error ? error.message : String(error);
+
   const errInfo: FirestoreErrorInfo = {
-    error: error instanceof Error ? error.message : String(error),
+    error: rawMsg,
     authInfo: {
       userId: auth.currentUser?.uid,
       email: auth.currentUser?.email,
@@ -57,8 +59,18 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
     operationType,
     path
   };
-  console.error('Firestore Error: ', JSON.stringify(errInfo));
-  throw new Error(JSON.stringify(errInfo));
+  console.error('Firestore Error:', JSON.stringify(errInfo));
+
+  if (rawMsg.toLowerCase().includes('quota') || rawMsg.toLowerCase().includes('resource_exhausted')) {
+    throw new Error('Database daily quota exceeded. Please wait a few minutes or upgrade your Firebase quota.');
+  }
+
+  if (rawMsg.toLowerCase().includes('permission') || rawMsg.toLowerCase().includes('insufficient')) {
+    throw new Error('Permission denied: You do not have authorization for this operation.');
+  }
+
+  // Throw clean human-readable message instead of raw JSON string
+  throw new Error(rawMsg || `Firestore operation failed (${operationType} at ${path})`);
 }
 
 export function cn(...inputs: ClassValue[]) {

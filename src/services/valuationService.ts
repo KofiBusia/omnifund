@@ -301,15 +301,6 @@ export const runGlobalValuation = async () => {
           lastValuationDate: new Date().toISOString()
         });
 
-        // Update all investors for this account
-        const invUpdates = invSnap.docs.map(d => {
-          const invData = d.data();
-          return updateDoc(doc(db, 'investors', d.id), {
-            currentValue: (invData.unitsOwned || 0) * calculatedNAV
-          });
-        });
-        await Promise.all(invUpdates);
-
         // Log valuation
         await addDoc(collection(db, 'valuations'), {
           accountId: account.id,
@@ -420,15 +411,6 @@ export const runManualValuation = async (
       lastValuationDate: effectiveDate
     });
 
-    // 5. Update all Investors belonging to this account
-    const investorUpdates = invSnap.docs.map(d => {
-      const invData = d.data();
-      return updateDoc(doc(db, 'investors', d.id), {
-        currentValue: (invData.unitsOwned || 0) * finalNav
-      });
-    });
-    await Promise.all(investorUpdates);
-
     // 6. Log Valuation Entry in Firestore
     await addDoc(collection(db, 'valuations'), {
       accountId,
@@ -488,18 +470,6 @@ export const deleteLatestValuation = async (accountId: string, valuationId: stri
       aum: targetAum,
       lastValuationDate: targetDate
     });
-
-    // 5. Revert Investors Performance
-    console.info('Reverting investor balances to target NAV:', targetNav);
-    const invQuery = query(collection(db, 'investors'), where('accountId', '==', accountId));
-    const invSnap = await getDocs(invQuery);
-    const investorUpdates = invSnap.docs.map(d => {
-      const data = d.data();
-      return updateDoc(doc(db, 'investors', d.id), {
-        currentValue: (data.unitsOwned || 0) * targetNav
-      });
-    });
-    await Promise.all(investorUpdates);
 
     // 6. Revert Portfolio Performance (approximated or reset if needed)
     // Since we don't store historical prices per asset in the valuation doc,
@@ -594,17 +564,6 @@ export const revertAssetValuation = async (assetId: string, valuationId: string)
       lastValuationDate: new Date().toISOString()
     });
 
-    // 6. Update Investors
-    const invQuery = query(collection(db, 'investors'), where('accountId', '==', accountId));
-    const invSnap = await getDocs(invQuery);
-    const investorUpdates = invSnap.docs.map(d => {
-      const invData = d.data();
-      return updateDoc(doc(db, 'investors', d.id), {
-        currentValue: (invData.unitsOwned || 0) * finalNav
-      });
-    });
-    await Promise.all(investorUpdates);
-
     // 7. Log account level valuation change
     await addDoc(collection(db, 'valuations'), {
       accountId,
@@ -661,15 +620,6 @@ export const recalculateAccountValuation = async (accountId: string) => {
       lastValuationDate: new Date().toISOString()
     });
 
-    // Update all investors for this account
-    const invUpdates = invSnap.docs.map(d => {
-      const invData = d.data();
-      return updateDoc(doc(db, 'investors', d.id), {
-        currentValue: (invData.unitsOwned || 0) * calculatedNAV
-      });
-    });
-    await Promise.all(invUpdates);
-
     // Filter out old valuation logs for today if we want to avoid spam, but usually logging is good
     await addDoc(collection(db, 'valuations'), {
       accountId: accountId,
@@ -719,17 +669,6 @@ export const redoLatestValuation = async (accountId: string) => {
       aum: latestReverted.aum,
       lastValuationDate: new Date().toISOString()
     });
-
-    // Sync Investors
-    const invQuery = query(collection(db, 'investors'), where('accountId', '==', accountId));
-    const invSnap = await getDocs(invQuery);
-    const invRedoUpdates = invSnap.docs.map(d => {
-      const invData = d.data();
-      return updateDoc(doc(db, 'investors', d.id), {
-        currentValue: (invData.unitsOwned || 0) * latestReverted.nav
-      });
-    });
-    await Promise.all(invRedoUpdates);
 
     // 4. Remove from reverted
     await deleteDoc(doc(db, 'reverted_valuations', latestReverted.id));
