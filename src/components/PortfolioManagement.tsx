@@ -35,6 +35,12 @@ import { db } from '../firebase';
 import { handleFirestoreError, OperationType } from '../lib/utils';
 import { runGlobalValuation, revertAssetValuation, recalculateAccountValuation } from '../services/valuationService';
 import { syncRealtimeAFXPrices, AFXSyncResult } from '../services/afxSyncService';
+import { 
+  executeSafeWrite, 
+  saveLocalAsset, 
+  updateLocalAssetPrice, 
+  deleteLocalAsset 
+} from '../services/localDbService';
 import { calculateAssetDisposal, calculateNetAssets, calculateNavPerUnit, roundMoney } from '../services/fundAccountingEngine';
 import { AssetValuation } from '../types';
 import { generatePortfolioStatementPDF } from '../lib/pdfGenerator';
@@ -403,31 +409,52 @@ export default function PortfolioManagement({ portfolio, fund, accounts, role }:
     const loadingToast = toast.loading("Updating portfolio asset...");
 
     try {
-      const assetRef = doc(db, 'portfolio', editingAsset.id);
-      
       const marketValue = newAsset.marketValue || (newAsset.quantity * newAsset.currentPrice);
       const totalCost = newAsset.totalCostBasis || (newAsset.quantity * newAsset.costBasis);
-      
-      await updateDoc(assetRef, {
-        ticker: newAsset.ticker.trim().toUpperCase(),
-        name: newAsset.name.trim(),
-        sector: newAsset.sector,
-        quantity: Number(newAsset.quantity),
-        costBasis: Number(newAsset.costBasis),
-        totalCostBasis: Number(totalCost),
-        currentPrice: Number(newAsset.currentPrice),
-        marketValue: Number(marketValue),
-        recordedAt: newAsset.recordedAt || new Date().toISOString().split('T')[0],
-        unrealizedGainLoss: Number(marketValue - totalCost)
-      });
 
-      toast.success("Asset updated successfully", { id: loadingToast });
-      
-      // Critical: Recalculate account valuation after update
-      if (editingAsset.accountId) {
-        await recalculateAccountValuation(editingAsset.accountId);
-      } else if (localAccountId) {
-        await recalculateAccountValuation(localAccountId);
+      const { isQuotaFallback } = await executeSafeWrite(
+        async () => {
+          const assetRef = doc(db, 'portfolio', editingAsset.id);
+          await updateDoc(assetRef, {
+            ticker: newAsset.ticker.trim().toUpperCase(),
+            name: newAsset.name.trim(),
+            sector: newAsset.sector,
+            quantity: Number(newAsset.quantity),
+            costBasis: Number(newAsset.costBasis),
+            totalCostBasis: Number(totalCost),
+            currentPrice: Number(newAsset.currentPrice),
+            marketValue: Number(marketValue),
+            recordedAt: newAsset.recordedAt || new Date().toISOString().split('T')[0],
+            unrealizedGainLoss: Number(marketValue - totalCost)
+          });
+
+          if (editingAsset.accountId) {
+            await recalculateAccountValuation(editingAsset.accountId);
+          } else if (localAccountId) {
+            await recalculateAccountValuation(localAccountId);
+          }
+        },
+        () => {
+          saveLocalAsset({
+            id: editingAsset.id,
+            accountId: editingAsset.accountId || localAccountId || '',
+            ticker: newAsset.ticker.trim().toUpperCase(),
+            name: newAsset.name.trim(),
+            sector: newAsset.sector,
+            quantity: Number(newAsset.quantity),
+            costBasis: Number(newAsset.costBasis),
+            totalCostBasis: Number(totalCost),
+            currentPrice: Number(newAsset.currentPrice),
+            marketValue: Number(marketValue),
+            recordedAt: newAsset.recordedAt || new Date().toISOString().split('T')[0]
+          });
+        }
+      );
+
+      if (isQuotaFallback) {
+        toast.success("⚡ Asset updated locally! (Firestore quota limit reached, operating in resilient mode)", { id: loadingToast });
+      } else {
+        toast.success("Asset updated successfully", { id: loadingToast });
       }
 
       setIsEditModalOpen(false);
@@ -472,47 +499,73 @@ export default function PortfolioManagement({ portfolio, fund, accounts, role }:
     const loadingToast = toast.loading("Recording portfolio investment...");
 
     try {
-      await runTransaction(db, async (transaction) => {
-        const accountRef = doc(db, 'accounts', modalSelectedAccount.id);
-        const assetRef = doc(collection(db, 'portfolio'));
-        
-        const marketValue = newAsset.marketValue || (newAsset.quantity * (newAsset.currentPrice || newAsset.tradePrice));
-        const totalCost = newAsset.totalCostBasis || (newAsset.quantity * newAsset.costBasis) || newAsset.tradeConsideration;
-        
-        transaction.set(assetRef, {
-          accountId: modalSelectedAccount.id,
-          ticker: newAsset.ticker.trim().toUpperCase(),
-          name: newAsset.name.trim(),
-          sector: newAsset.sector,
-          quantity: Number(newAsset.quantity),
-          tradePrice: Number(newAsset.tradePrice || newAsset.costBasis),
-          tradeConsideration: Number(newAsset.tradeConsideration || (newAsset.quantity * newAsset.tradePrice)),
-          tradeLevies: Number(newAsset.tradeLevies || 0),
-          brokerCommission: Number(newAsset.brokerCommission || 0),
-          costBasis: Number(newAsset.costBasis || (totalCost / newAsset.quantity)),
-          totalCostBasis: Number(totalCost),
-          currentPrice: Number(newAsset.currentPrice || newAsset.tradePrice),
-          marketValue: Number(marketValue),
-          valuationDate: new Date().toISOString(),
-          recordedAt: newAsset.recordedAt || new Date().toISOString().split('T')[0],
-          unrealizedGainLoss: Number(marketValue - totalCost),
-          brokerName: newAsset.brokerName || 'Merban Stockbrokers Ltd',
-          csdNumber: newAsset.csdNumber || '',
-          clientAccountNo: newAsset.clientAccountNo || '',
-          contractNoteRef: newAsset.contractNoteRef || ''
-        });
+      const marketValue = newAsset.marketValue || (newAsset.quantity * (newAsset.currentPrice || newAsset.tradePrice));
+      const totalCostCalc = newAsset.totalCostBasis || (newAsset.quantity * newAsset.costBasis) || newAsset.tradeConsideration;
 
-        // 2. Deduct from cash balance
-        transaction.update(accountRef, {
-          cashBalance: increment(-totalCost)
-        });
-      });
+      const { isQuotaFallback } = await executeSafeWrite(
+        async () => {
+          await runTransaction(db, async (transaction) => {
+            const accountRef = doc(db, 'accounts', modalSelectedAccount.id);
+            const assetRef = doc(collection(db, 'portfolio'));
 
-      toast.success("Asset added to portfolio successfully", { id: loadingToast });
-      
-      // Critical: Recalculate account valuation after adding new asset
-      if (modalSelectedAccount) {
-        await recalculateAccountValuation(modalSelectedAccount.id);
+            transaction.set(assetRef, {
+              accountId: modalSelectedAccount.id,
+              ticker: newAsset.ticker.trim().toUpperCase(),
+              name: newAsset.name.trim(),
+              sector: newAsset.sector,
+              quantity: Number(newAsset.quantity),
+              tradePrice: Number(newAsset.tradePrice || newAsset.costBasis),
+              tradeConsideration: Number(newAsset.tradeConsideration || (newAsset.quantity * newAsset.tradePrice)),
+              tradeLevies: Number(newAsset.tradeLevies || 0),
+              brokerCommission: Number(newAsset.brokerCommission || 0),
+              costBasis: Number(newAsset.costBasis || (totalCostCalc / newAsset.quantity)),
+              totalCostBasis: Number(totalCostCalc),
+              currentPrice: Number(newAsset.currentPrice || newAsset.tradePrice),
+              marketValue: Number(marketValue),
+              valuationDate: new Date().toISOString(),
+              recordedAt: newAsset.recordedAt || new Date().toISOString().split('T')[0],
+              unrealizedGainLoss: Number(marketValue - totalCostCalc),
+              brokerName: newAsset.brokerName || 'Merban Stockbrokers Ltd',
+              csdNumber: newAsset.csdNumber || '',
+              clientAccountNo: newAsset.clientAccountNo || '',
+              contractNoteRef: newAsset.contractNoteRef || ''
+            });
+
+            transaction.update(accountRef, {
+              cashBalance: increment(-totalCostCalc)
+            });
+          });
+
+          if (modalSelectedAccount) {
+            await recalculateAccountValuation(modalSelectedAccount.id);
+          }
+        },
+        () => {
+          saveLocalAsset({
+            accountId: modalSelectedAccount.id,
+            ticker: newAsset.ticker.trim().toUpperCase(),
+            name: newAsset.name.trim(),
+            sector: newAsset.sector,
+            quantity: Number(newAsset.quantity),
+            tradePrice: Number(newAsset.tradePrice || newAsset.costBasis),
+            tradeConsideration: Number(newAsset.tradeConsideration || (newAsset.quantity * newAsset.tradePrice)),
+            costBasis: Number(newAsset.costBasis || (totalCostCalc / newAsset.quantity)),
+            totalCostBasis: Number(totalCostCalc),
+            currentPrice: Number(newAsset.currentPrice || newAsset.tradePrice),
+            marketValue: Number(marketValue),
+            recordedAt: newAsset.recordedAt || new Date().toISOString().split('T')[0],
+            brokerName: newAsset.brokerName || '',
+            csdNumber: newAsset.csdNumber || '',
+            clientAccountNo: newAsset.clientAccountNo || '',
+            contractNoteRef: newAsset.contractNoteRef || ''
+          });
+        }
+      );
+
+      if (isQuotaFallback) {
+        toast.success("⚡ Asset saved locally! (Firestore quota limit reached, operating in resilient offline mode)", { id: loadingToast });
+      } else {
+        toast.success("Asset added to portfolio successfully", { id: loadingToast });
       }
 
       setIsAddModalOpen(false);
@@ -541,14 +594,23 @@ export default function PortfolioManagement({ portfolio, fund, accounts, role }:
 
     const loadingToast = toast.loading("Removing asset and recalculating NAV...");
     try {
-      await deleteDoc(doc(db, 'portfolio', asset.id));
-      
-      // Recalculate NAV after deletion
-      if (asset.accountId) {
-        await recalculateAccountValuation(asset.accountId);
+      const { isQuotaFallback } = await executeSafeWrite(
+        async () => {
+          await deleteDoc(doc(db, 'portfolio', asset.id));
+          if (asset.accountId) {
+            await recalculateAccountValuation(asset.accountId);
+          }
+        },
+        () => {
+          deleteLocalAsset(asset.id);
+        }
+      );
+
+      if (isQuotaFallback) {
+        toast.success("⚡ Asset removed locally! (Firestore quota limit reached, operating in resilient offline mode)", { id: loadingToast });
+      } else {
+        toast.success("Asset removed and NAV recalculated", { id: loadingToast });
       }
-      
-      toast.success("Asset removed and NAV recalculated", { id: loadingToast });
     } catch (error: any) {
       console.error("Error deleting asset:", error);
       toast.error(`Failed to delete asset: ${error.message}`, { id: loadingToast });
@@ -559,14 +621,21 @@ export default function PortfolioManagement({ portfolio, fund, accounts, role }:
     const asset = portfolio.find(a => a.id === assetId);
     if (!asset) return;
     try {
-      await updateDoc(doc(db, 'portfolio', assetId), {
-        currentPrice: newPrice,
-        marketValue: asset.quantity * newPrice,
-        valuationDate: new Date().toISOString()
-      });
-      if (asset.accountId) {
-        await recalculateAccountValuation(asset.accountId);
-      }
+      await executeSafeWrite(
+        async () => {
+          await updateDoc(doc(db, 'portfolio', assetId), {
+            currentPrice: newPrice,
+            marketValue: asset.quantity * newPrice,
+            valuationDate: new Date().toISOString()
+          });
+          if (asset.accountId) {
+            await recalculateAccountValuation(asset.accountId);
+          }
+        },
+        () => {
+          updateLocalAssetPrice(assetId, newPrice);
+        }
+      );
     } catch (error) {
       console.error("Error updating price", error);
     }

@@ -14,6 +14,7 @@ import {
   Investor
 } from '../types';
 import { handleFirestoreError, OperationType } from '../lib/utils';
+import { isQuotaExceededError } from './localDbService';
 import { calculateNetAssets, calculateNavPerUnit, roundMoney, roundNav } from './fundAccountingEngine';
 
 // Default Fee Configuration: 1.50% Management Fee, 0.25% Custody Fee p.a.
@@ -310,12 +311,18 @@ export const runGlobalValuation = async () => {
           notes: 'Automated Market Valuation'
         });
       } catch (innerError) {
-        handleFirestoreError(innerError, OperationType.WRITE, `accounts/${account.id}/valuation`);
+        if (!isQuotaExceededError(innerError)) {
+          handleFirestoreError(innerError, OperationType.WRITE, `accounts/${account.id}/valuation`);
+        }
       }
     }
 
     console.log("Global valuation completed successfully.");
   } catch (error) {
+    if (isQuotaExceededError(error)) {
+      console.warn("⚡ Firestore Quota Exceeded during runGlobalValuation — Skipping cloud sync.");
+      return;
+    }
     if (error instanceof Error && error.message.includes('JSON')) {
       throw error;
     }
@@ -630,7 +637,11 @@ export const recalculateAccountValuation = async (accountId: string) => {
     });
 
     return { aum: calculatedAum, nav: calculatedNAV };
-  } catch (error) {
+  } catch (error: any) {
+    if (isQuotaExceededError(error)) {
+      console.warn(`⚡ Firestore Quota Exceeded during recalculateAccountValuation for account ${accountId}. Applying local fallback.`);
+      return { aum: 0, nav: 1.0000 };
+    }
     handleFirestoreError(error, OperationType.WRITE, `accounts/${accountId}/recalculate`);
     throw error;
   }

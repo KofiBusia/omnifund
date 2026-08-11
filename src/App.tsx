@@ -60,6 +60,12 @@ import {
 } from './data/mockDemoData';
 
 import { cn, handleFirestoreError, OperationType } from './lib/utils';
+import { 
+  setLocalCollection, 
+  getLocalCollection, 
+  subscribeToLocalDb, 
+  isQuotaExceededError 
+} from './services/localDbService';
 
 // Components
 import Dashboard from './components/Dashboard';
@@ -254,37 +260,66 @@ export default function App() {
     const accountsUnsub = onSnapshot(collection(db, 'accounts'), (snapshot) => {
       const data = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as InvestmentAccount));
       setAccounts(data);
-    }, (error) => handleFirestoreError(error, OperationType.GET, 'accounts'));
+      setLocalCollection('accounts', data);
+    }, (error) => {
+      if (isQuotaExceededError(error)) setAccounts(getLocalCollection('accounts'));
+      else handleFirestoreError(error, OperationType.GET, 'accounts');
+    });
 
     const investorsUnsub = onSnapshot(collection(db, 'investors'), (snapshot) => {
       const data = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as Investor));
       setInvestors(data);
-    }, (error) => handleFirestoreError(error, OperationType.GET, 'investors'));
+      setLocalCollection('investors', data);
+    }, (error) => {
+      if (isQuotaExceededError(error)) setInvestors(getLocalCollection('investors'));
+      else handleFirestoreError(error, OperationType.GET, 'investors');
+    });
 
     const portfolioUnsub = onSnapshot(collection(db, 'portfolio'), (snapshot) => {
       const data = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as Asset));
       setPortfolio(data);
-    }, (error) => handleFirestoreError(error, OperationType.GET, 'portfolio'));
+      setLocalCollection('portfolio', data);
+    }, (error) => {
+      if (isQuotaExceededError(error)) setPortfolio(getLocalCollection('portfolio'));
+      else handleFirestoreError(error, OperationType.GET, 'portfolio');
+    });
 
     const transactionsUnsub = onSnapshot(collection(db, 'transactions'), (snapshot) => {
       const data = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as Transaction));
       setTransactions(data);
-    }, (error) => handleFirestoreError(error, OperationType.GET, 'transactions'));
+      setLocalCollection('transactions', data);
+    }, (error) => {
+      if (isQuotaExceededError(error)) setTransactions(getLocalCollection('transactions'));
+      else handleFirestoreError(error, OperationType.GET, 'transactions');
+    });
 
     const valuationsUnsub = onSnapshot(collection(db, 'valuations'), (snapshot) => {
       const data = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as Valuation));
-      // Sort: treat null dates (pending writes) as "now" (putting them at the top)
-      setValuations(data.sort((a, b) => {
-        const timeA = a.date?.seconds || Date.now() / 1000 + 1000; // Use future for pending
+      const sorted = data.sort((a, b) => {
+        const timeA = a.date?.seconds || Date.now() / 1000 + 1000;
         const timeB = b.date?.seconds || Date.now() / 1000 + 1000;
         return timeB - timeA;
-      }));
-    }, (error) => handleFirestoreError(error, OperationType.GET, 'valuations'));
+      });
+      setValuations(sorted);
+      setLocalCollection('valuations', sorted);
+    }, (error) => {
+      if (isQuotaExceededError(error)) setValuations(getLocalCollection('valuations'));
+      else handleFirestoreError(error, OperationType.GET, 'valuations');
+    });
 
     const revertedUnsub = onSnapshot(collection(db, 'reverted_valuations'), (snapshot) => {
       const data = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id }));
       setRevertedValuations(data);
     }, (error) => handleFirestoreError(error, OperationType.GET, 'reverted_valuations'));
+
+    // Subscribe to local storage changes (for local quota fallback updates)
+    const unsubLocal = subscribeToLocalDb((col, data) => {
+      if (col === 'portfolio') setPortfolio(data);
+      if (col === 'accounts') setAccounts(data);
+      if (col === 'investors') setInvestors(data);
+      if (col === 'transactions') setTransactions(data);
+      if (col === 'valuations') setValuations(data);
+    });
 
     return () => {
       accountsUnsub();
@@ -293,6 +328,7 @@ export default function App() {
       transactionsUnsub();
       valuationsUnsub();
       revertedUnsub();
+      unsubLocal();
     };
   }, [user, role, isDemoMode]);
 
