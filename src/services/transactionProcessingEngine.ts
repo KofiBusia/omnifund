@@ -414,7 +414,9 @@ export function analyseAndStageBatch(
 }
 
 /**
- * Stage 2: Atomic Batch Ledger Posting
+ * Bulk Financial Transaction Posting Engine (High-Performance WriteBatch Execution)
+ * Posts subscriptions, redemptions, and fee entries atomically in parallel write batches.
+ * Updates investor unit balances, total investment, and fund AUM/Cash.
  */
 export async function postTransactionBatch(
   batch: TransactionBatch,
@@ -425,6 +427,10 @@ export async function postTransactionBatch(
   let successCount = 0;
   let failureCount = 0;
   const postedTransactionIds: string[] = [];
+
+  const batchOperations: { type: 'set' | 'update'; ref: any; data: any }[] = [];
+  let totalFundUnitsDelta = 0;
+  let totalFundCashDelta = 0;
 
   for (const record of recordsToPost) {
     const unitsToIssue = (record.calculatedUnits && record.calculatedUnits > 0)
@@ -446,97 +452,125 @@ export async function postTransactionBatch(
       continue;
     }
 
-    try {
-      await runTransaction(db, async (dbTx) => {
-        const accountRef = doc(db, 'accounts', account.id);
-        const investorRef = doc(db, 'investors', investor.id);
+    let unitsDelta = 0;
+    let cashDelta = 0;
+    let costBasisDelta = 0;
+    let costBasisReduction = 0;
+    let realizedGainLoss = 0;
 
-        let unitsDelta = 0;
-        let cashDelta = 0;
-        let costBasisDelta = 0;
-        let costBasisReduction = 0;
-        let realizedGainLoss = 0;
+    if (record.normalisedType === 'Subscription' || record.normalisedType === 'BUY') {
+      unitsDelta = unitsToIssue;
+      cashDelta = grossAmount;
+      costBasisDelta = grossAmount;
+    } else if (record.normalisedType === 'Redemption' || record.normalisedType === 'SELL') {
+      const red = calculateRedemption(
+        unitsToIssue,
+        investor.unitsOwned,
+        investor.totalInvestment,
+        record.applicableNav!
+      );
+      unitsDelta = -red.unitsRedeemed;
+      cashDelta = -red.grossProceeds;
+      costBasisDelta = -red.costBasisReduction;
+      costBasisReduction = red.costBasisReduction;
+      realizedGainLoss = red.realizedGainLoss;
+    } else if (record.normalisedType === 'Dividend' || record.normalisedType === 'Interest') {
+      cashDelta = grossAmount;
+    } else if (record.normalisedType === 'ManagementFee' || record.normalisedType === 'AdminFee') {
+      cashDelta = -grossAmount;
+    }
 
-        if (record.normalisedType === 'Subscription' || record.normalisedType === 'BUY') {
-          unitsDelta = unitsToIssue;
-          cashDelta = grossAmount;
-          costBasisDelta = grossAmount;
-        } else if (record.normalisedType === 'Redemption' || record.normalisedType === 'SELL') {
-          const red = calculateRedemption(
-            unitsToIssue,
-            investor.unitsOwned,
-            investor.totalInvestment,
-            record.applicableNav!
-          );
-          unitsDelta = -red.unitsRedeemed;
-          cashDelta = -red.grossProceeds;
-          costBasisDelta = -red.costBasisReduction;
-          costBasisReduction = red.costBasisReduction;
-          realizedGainLoss = red.realizedGainLoss;
-        } else if (record.normalisedType === 'Dividend' || record.normalisedType === 'Interest') {
-          cashDelta = grossAmount; // Increases fund cash
-        } else if (record.normalisedType === 'ManagementFee' || record.normalisedType === 'AdminFee') {
-          cashDelta = -grossAmount; // Reduces fund cash
+    totalFundUnitsDelta += unitsDelta;
+    totalFundCashDelta += cashDelta;
+
+    // 1. Update Investor Document
+    const investorRef = doc(db, 'investors', investor.id);
+    batchOperations.push({
+      type: 'update',
+      ref: investorRef,
+      data: {
+        unitsOwned: increment(unitsDelta),
+        totalInvestment: increment(costBasisDelta),
+        ...(realizedGainLoss !== 0 ? { realizedGainLoss: increment(realizedGainLoss) } : {})
+      }
+    });
+
+    // 2. Post to Transactions Collection
+    const transRef = doc(collection(db, 'transactions'));
+    
+    batchOperations.push({
+      type: 'set',
+      ref: transRef,
+      data: {
+        investorId: investor.id,
+        accountId: account.id,
+        type: record.normalisedType,
+        units: Math.abs(unitsDelta),
+        pricePerUnit: record.applicableNav!,
+        totalAmount: grossAmount,
+        costBasisReduction,
+        realizedGainLoss,
+        timestamp: new Date(record.validatedDate!).toISOString(),
+        effectiveDate: record.validatedDate!,
+        status: 'posted',
+        source: 'bulk_upload',
+        batchId: batch.id,
+        reference: record.reference || '',
+        createdBy: 'System Batch Posting'
+      }
+    });
+
+    // 3. Post to Unit Movement Ledger
+    const ledgerRef = doc(collection(db, 'unit_ledger'));
+    batchOperations.push({
+      type: 'set',
+      ref: ledgerRef,
+      data: {
+        timestamp: new Date().toISOString(),
+        effectiveDate: record.validatedDate!,
+        accountId: account.id,
+        investorId: investor.id,
+        transactionId: transRef.id,
+        transactionType: record.normalisedType,
+        unitsDelta,
+        runningInvestorUnits: roundUnits(investor.unitsOwned + unitsDelta),
+        runningFundUnits: roundUnits(account.totalUnits + unitsDelta),
+        applicableNav: record.applicableNav!,
+        reference: record.reference || ''
+      }
+    });
+
+    postedTransactionIds.push(transRef.id);
+    successCount++;
+  }
+
+  // 4. Fund Account Document Cumulative Update
+  if (totalFundUnitsDelta !== 0 || totalFundCashDelta !== 0) {
+    const accountRef = doc(db, 'accounts', account.id);
+    batchOperations.push({
+      type: 'update',
+      ref: accountRef,
+      data: {
+        totalUnits: increment(totalFundUnitsDelta),
+        cashBalance: increment(totalFundCashDelta)
+      }
+    });
+  }
+
+  // Execute all operations in high-speed write batches (Max 400 writes per batch request)
+  if (batchOperations.length > 0) {
+    const BATCH_SIZE = 400;
+    for (let i = 0; i < batchOperations.length; i += BATCH_SIZE) {
+      const chunk = batchOperations.slice(i, i + BATCH_SIZE);
+      const batchOp = writeBatch(db);
+      chunk.forEach(op => {
+        if (op.type === 'set') {
+          batchOp.set(op.ref, op.data);
+        } else if (op.type === 'update') {
+          batchOp.update(op.ref, op.data);
         }
-
-        // 1. Update Investor Document
-        dbTx.update(investorRef, {
-          unitsOwned: increment(unitsDelta),
-          totalInvestment: increment(costBasisDelta),
-          ...(realizedGainLoss !== 0 ? { realizedGainLoss: increment(realizedGainLoss) } : {})
-        });
-
-        // 2. Update Fund Account Document
-        dbTx.update(accountRef, {
-          totalUnits: increment(unitsDelta),
-          cashBalance: increment(cashDelta)
-        });
-
-        // 3. Post to Transactions Collection
-        const transRef = doc(collection(db, 'transactions'));
-        const dbType = (record.normalisedType === 'Redemption' || record.normalisedType === 'SELL') ? 'SELL' : 'BUY';
-        
-        dbTx.set(transRef, {
-          investorId: investor.id,
-          accountId: account.id,
-          type: record.normalisedType,
-          units: Math.abs(unitsDelta),
-          pricePerUnit: record.applicableNav!,
-          totalAmount: record.rawAmount,
-          costBasisReduction,
-          realizedGainLoss,
-          timestamp: new Date(record.validatedDate!).toISOString(),
-          effectiveDate: record.validatedDate!,
-          status: 'posted',
-          source: 'bulk_upload',
-          batchId: batch.id,
-          reference: record.reference || '',
-          createdBy: 'System Batch Posting'
-        });
-
-        // 4. Post to Unit Movement Ledger
-        const ledgerRef = doc(collection(db, 'unit_ledger'));
-        dbTx.set(ledgerRef, {
-          timestamp: new Date().toISOString(),
-          effectiveDate: record.validatedDate!,
-          accountId: account.id,
-          investorId: investor.id,
-          transactionId: transRef.id,
-          transactionType: record.normalisedType,
-          unitsDelta,
-          runningInvestorUnits: roundUnits(investor.unitsOwned + unitsDelta),
-          runningFundUnits: roundUnits(account.totalUnits + unitsDelta),
-          applicableNav: record.applicableNav!,
-          reference: record.reference || ''
-        });
-
-        postedTransactionIds.push(transRef.id);
       });
-
-      successCount++;
-    } catch (error) {
-      console.error('Batch record transaction post error:', error);
-      failureCount++;
+      await batchOp.commit();
     }
   }
 

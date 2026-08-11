@@ -364,6 +364,7 @@ export async function commitInvestorBulkBatch(
   const postedTransactionIds: string[] = [];
 
   const createdOrMatchedInvestorsMap = new Map<number, Investor>();
+  const newInvestorsToSet: { ref: any; data: Investor }[] = [];
 
   // PHASE 1: Master Investor Creation & Account Linkage
   for (const row of rowsToCommit) {
@@ -405,10 +406,7 @@ export async function commitInvestorBulkBatch(
           createdBy: 'Bulk Investor Import'
         };
 
-        await runTransaction(db, async (dbTx) => {
-          dbTx.set(newInvRef, newInvData);
-        });
-
+        newInvestorsToSet.push({ ref: newInvRef, data: newInvData });
         activeInvestor = newInvData;
         createdInvestorsCount++;
       }
@@ -417,6 +415,19 @@ export async function commitInvestorBulkBatch(
     } catch (err) {
       console.error(`Failed to create investor master record for row ${row.rowNumber}:`, err);
       failedRowsCount++;
+    }
+  }
+
+  // Commit Phase 1 in high-speed write batches (max 400 operations per batch)
+  if (newInvestorsToSet.length > 0) {
+    const BATCH_SIZE = 400;
+    for (let i = 0; i < newInvestorsToSet.length; i += BATCH_SIZE) {
+      const chunk = newInvestorsToSet.slice(i, i + BATCH_SIZE);
+      const batchOp = writeBatch(db);
+      chunk.forEach(item => {
+        batchOp.set(item.ref, item.data);
+      });
+      await batchOp.commit();
     }
   }
 
@@ -484,20 +495,15 @@ export async function commitInvestorBulkBatch(
     }
   }
 
-  // PHASE 3: Portal Provisioning & Activation Links (Non-blocking)
+  // PHASE 3: Portal Provisioning & Activation Links (Non-blocking Parallel Execution)
   if (enablePortalAccess) {
-    for (const [_, inv] of createdOrMatchedInvestorsMap.entries()) {
-      if (inv.email && inv.email.includes('@')) {
-        try {
-          const provRes = await approveInvestorAndEnablePortal(inv.id, 'Bulk Import Auto-Provision');
-          if (provRes.investor) {
-            portalInvitationsSent++;
-          }
-        } catch (emailErr) {
-          console.warn(`Portal provisioning email failed for ${inv.email} (Financial transaction preserved):`, emailErr);
-        }
-      }
-    }
+    const invList = Array.from(createdOrMatchedInvestorsMap.values()).filter(i => i.email && i.email.includes('@'));
+    const provPromises = invList.map(inv => approveInvestorAndEnablePortal(inv.id, 'Bulk Import Auto-Provision').catch(err => {
+      console.warn(`Portal provisioning email failed for ${inv.email}:`, err);
+      return null;
+    }));
+    const results = await Promise.allSettled(provPromises);
+    portalInvitationsSent = results.filter(r => r.status === 'fulfilled' && (r.value as any)?.investor).length;
   }
 
   return {
