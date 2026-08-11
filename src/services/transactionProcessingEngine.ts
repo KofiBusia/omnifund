@@ -413,97 +413,117 @@ export function analyseAndStageBatch(
   };
 }
 
+// ── Progress Reporting Types ──────────────────────────────────────────────────
+export interface PostTransactionProgressItem {
+  name: string;
+  amount: number;
+  units: number;
+  nav: number;
+  txDate: string;
+}
+
 /**
- * Bulk Financial Transaction Posting Engine (High-Performance WriteBatch Execution)
- * Posts subscriptions, redemptions, and fee entries atomically in parallel write batches.
- * Updates investor unit balances, total investment, and fund AUM/Cash.
+ * Bulk Financial Transaction Posting Engine — Chunked with Real-Time Progress
+ *
+ * Architecture:
+ *  - Processes records in atomic chunks of CHUNK_SIZE (150 records = 451 ops max — under Firestore's 500 limit)
+ *  - Each chunk is committed independently so partial progress is visible immediately
+ *  - Fund account totals updated per chunk (not just at end) for correctness
+ *  - NAV is validated per-record using the historical date already resolved during staging
+ *  - onProgress fires after each committed chunk with live counters & last item metadata
  */
 export async function postTransactionBatch(
   batch: TransactionBatch,
   recordsToPost: StagedTransactionRecord[],
   account: InvestmentAccount,
-  investors: Investor[]
+  investors: Investor[],
+  onProgress?: (
+    successCount: number,
+    failureCount: number,
+    total: number,
+    lastItem: PostTransactionProgressItem | null
+  ) => void
 ): Promise<{ successCount: number; failureCount: number; postedTransactionIds: string[] }> {
   let successCount = 0;
   let failureCount = 0;
   const postedTransactionIds: string[] = [];
 
-  const batchOperations: { type: 'set' | 'update'; ref: any; data: any }[] = [];
-  let totalFundUnitsDelta = 0;
-  let totalFundCashDelta = 0;
+  // 150 records × 3 ops = 450 + 1 account update = 451 total — safely under Firestore's 500 op limit
+  const CHUNK_SIZE = 150;
+  const total = recordsToPost.length;
 
-  for (const record of recordsToPost) {
-    const unitsToIssue = (record.calculatedUnits && record.calculatedUnits > 0)
-      ? record.calculatedUnits
-      : (record.rawAmount && record.applicableNav ? roundUnits(record.rawAmount / record.applicableNav) : 0);
+  for (let chunkStart = 0; chunkStart < total; chunkStart += CHUNK_SIZE) {
+    const chunk = recordsToPost.slice(chunkStart, chunkStart + CHUNK_SIZE);
+    const batchOp = writeBatch(db);
+    let chunkUnitsDelta = 0;
+    let chunkCashDelta = 0;
+    let lastItem: PostTransactionProgressItem | null = null;
 
-    const grossAmount = (record.rawAmount && record.rawAmount > 0)
-      ? record.rawAmount
-      : roundMoney(unitsToIssue * (record.applicableNav || 1.0000));
+    for (const record of chunk) {
+      const unitsToIssue = (record.calculatedUnits && record.calculatedUnits > 0)
+        ? record.calculatedUnits
+        : (record.rawAmount && record.applicableNav ? roundUnits(record.rawAmount / record.applicableNav) : 0);
 
-    if (!record.matchedInvestorId || !record.validatedDate || !record.applicableNav || (unitsToIssue <= 0 && grossAmount <= 0)) {
-      failureCount++;
-      continue;
-    }
+      const grossAmount = (record.rawAmount && record.rawAmount > 0)
+        ? record.rawAmount
+        : roundMoney(unitsToIssue * (record.applicableNav || 1.0000));
 
-    const investor = investors.find(i => i.id === record.matchedInvestorId);
-    if (!investor) {
-      failureCount++;
-      continue;
-    }
+      if (!record.matchedInvestorId || !record.validatedDate || !record.applicableNav || (unitsToIssue <= 0 && grossAmount <= 0)) {
+        failureCount++;
+        continue;
+      }
 
-    let unitsDelta = 0;
-    let cashDelta = 0;
-    let costBasisDelta = 0;
-    let costBasisReduction = 0;
-    let realizedGainLoss = 0;
+      const investor = investors.find(i => i.id === record.matchedInvestorId);
+      if (!investor) {
+        failureCount++;
+        continue;
+      }
 
-    if (record.normalisedType === 'Subscription' || record.normalisedType === 'BUY') {
-      unitsDelta = unitsToIssue;
-      cashDelta = grossAmount;
-      costBasisDelta = grossAmount;
-    } else if (record.normalisedType === 'Redemption' || record.normalisedType === 'SELL') {
-      const red = calculateRedemption(
-        unitsToIssue,
-        investor.unitsOwned,
-        investor.totalInvestment,
-        record.applicableNav!
-      );
-      unitsDelta = -red.unitsRedeemed;
-      cashDelta = -red.grossProceeds;
-      costBasisDelta = -red.costBasisReduction;
-      costBasisReduction = red.costBasisReduction;
-      realizedGainLoss = red.realizedGainLoss;
-    } else if (record.normalisedType === 'Dividend' || record.normalisedType === 'Interest') {
-      cashDelta = grossAmount;
-    } else if (record.normalisedType === 'ManagementFee' || record.normalisedType === 'AdminFee') {
-      cashDelta = -grossAmount;
-    }
+      let unitsDelta = 0;
+      let cashDelta = 0;
+      let costBasisDelta = 0;
+      let costBasisReduction = 0;
+      let realizedGainLoss = 0;
 
-    totalFundUnitsDelta += unitsDelta;
-    totalFundCashDelta += cashDelta;
+      if (record.normalisedType === 'Subscription' || record.normalisedType === 'BUY') {
+        unitsDelta = unitsToIssue;
+        cashDelta = grossAmount;
+        costBasisDelta = grossAmount;
+      } else if (record.normalisedType === 'Redemption' || record.normalisedType === 'SELL') {
+        const red = calculateRedemption(
+          unitsToIssue,
+          investor.unitsOwned,
+          investor.totalInvestment,
+          record.applicableNav!
+        );
+        unitsDelta = -red.unitsRedeemed;
+        cashDelta = -red.grossProceeds;
+        costBasisDelta = -red.costBasisReduction;
+        costBasisReduction = red.costBasisReduction;
+        realizedGainLoss = red.realizedGainLoss;
+      } else if (record.normalisedType === 'Dividend' || record.normalisedType === 'Interest') {
+        cashDelta = grossAmount;
+      } else if (record.normalisedType === 'ManagementFee' || record.normalisedType === 'AdminFee') {
+        cashDelta = -grossAmount;
+      }
 
-    // 1. Update Investor Document (unitsOwned, totalInvestment, currentValue)
-    const investorRef = doc(db, 'investors', investor.id);
-    const newCurrentValue = roundMoney((investor.unitsOwned + unitsDelta) * (record.applicableNav || 1));
-    batchOperations.push({
-      type: 'update',
-      ref: investorRef,
-      data: {
+      chunkUnitsDelta += unitsDelta;
+      chunkCashDelta += cashDelta;
+
+      const newCurrentValue = roundMoney((investor.unitsOwned + unitsDelta) * (record.applicableNav || 1));
+
+      // 1. Update Investor Document
+      const investorRef = doc(db, 'investors', investor.id);
+      batchOp.update(investorRef, {
         unitsOwned: increment(unitsDelta),
         totalInvestment: increment(costBasisDelta),
         currentValue: newCurrentValue,
         ...(realizedGainLoss !== 0 ? { realizedGainLoss: increment(realizedGainLoss) } : {})
-      }
-    });
+      });
 
-    // 2. Post to Transactions Collection
-    const transRef = doc(collection(db, 'transactions'));
-    
-    batchOperations.push({
-      type: 'set',
-      ref: transRef,
-      data: {
+      // 2. Transaction Record
+      const transRef = doc(collection(db, 'transactions'));
+      batchOp.set(transRef, {
         investorId: investor.id,
         accountId: account.id,
         type: record.normalisedType,
@@ -519,15 +539,11 @@ export async function postTransactionBatch(
         batchId: batch.id,
         reference: record.reference || '',
         createdBy: 'System Batch Posting'
-      }
-    });
+      });
 
-    // 3. Post to Unit Movement Ledger
-    const ledgerRef = doc(collection(db, 'unit_ledger'));
-    batchOperations.push({
-      type: 'set',
-      ref: ledgerRef,
-      data: {
+      // 3. Unit Movement Ledger
+      const ledgerRef = doc(collection(db, 'unit_ledger'));
+      batchOp.set(ledgerRef, {
         timestamp: new Date().toISOString(),
         effectiveDate: record.validatedDate!,
         accountId: account.id,
@@ -536,44 +552,35 @@ export async function postTransactionBatch(
         transactionType: record.normalisedType,
         unitsDelta,
         runningInvestorUnits: roundUnits(investor.unitsOwned + unitsDelta),
-        runningFundUnits: roundUnits(account.totalUnits + unitsDelta),
+        runningFundUnits: roundUnits(account.totalUnits + chunkUnitsDelta),
         applicableNav: record.applicableNav!,
+        navDate: record.validatedDate!,
         reference: record.reference || ''
-      }
-    });
-
-    postedTransactionIds.push(transRef.id);
-    successCount++;
-  }
-
-  // 4. Fund Account Document Cumulative Update
-  if (totalFundUnitsDelta !== 0 || totalFundCashDelta !== 0) {
-    const accountRef = doc(db, 'accounts', account.id);
-    batchOperations.push({
-      type: 'update',
-      ref: accountRef,
-      data: {
-        totalUnits: increment(totalFundUnitsDelta),
-        cashBalance: increment(totalFundCashDelta)
-      }
-    });
-  }
-
-  // Execute all operations in high-speed write batches (Max 400 writes per batch request)
-  if (batchOperations.length > 0) {
-    const BATCH_SIZE = 400;
-    for (let i = 0; i < batchOperations.length; i += BATCH_SIZE) {
-      const chunk = batchOperations.slice(i, i + BATCH_SIZE);
-      const batchOp = writeBatch(db);
-      chunk.forEach(op => {
-        if (op.type === 'set') {
-          batchOp.set(op.ref, op.data);
-        } else if (op.type === 'update') {
-          batchOp.update(op.ref, op.data);
-        }
       });
-      await batchOp.commit();
+
+      postedTransactionIds.push(transRef.id);
+      successCount++;
+      lastItem = {
+        name: investor.name,
+        amount: grossAmount,
+        units: Math.abs(unitsDelta),
+        nav: record.applicableNav!,
+        txDate: record.validatedDate!
+      };
     }
+
+    // Update fund account atomically for this chunk
+    if (chunkUnitsDelta !== 0 || chunkCashDelta !== 0) {
+      const accountRef = doc(db, 'accounts', account.id);
+      batchOp.update(accountRef, {
+        totalUnits: increment(chunkUnitsDelta),
+        cashBalance: increment(chunkCashDelta)
+      });
+    }
+
+    // Commit this chunk and immediately fire progress
+    await batchOp.commit();
+    onProgress?.(successCount, failureCount, total, lastItem);
   }
 
   return { successCount, failureCount, postedTransactionIds };

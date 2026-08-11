@@ -355,17 +355,47 @@ export function analyseInvestorBulkCsv(
   };
 }
 
+// ── Bulk Commit Progress Type ─────────────────────────────────────────────────
+export interface BulkCommitProgress {
+  phase: 1 | 2 | 3;
+  phaseName: string;
+  phaseIcon: string;
+  /** Records processed in the CURRENT phase */
+  current: number;
+  /** Total records expected in the CURRENT phase */
+  total: number;
+  /** Cumulative successful records across ALL phases */
+  successCount: number;
+  failCount: number;
+  phase1Total: number;
+  phase1Done: number;
+  phase2Total: number;
+  phase2Done: number;
+  phase3Total: number;
+  phase3Done: number;
+  lastItem?: {
+    name: string;
+    amount: number;
+    units: number;
+    nav: number;
+    txDate: string;
+  };
+}
+
 /**
- * 4. Stage 2: Controlled Batch Commitment Engine
+ * Stage 2: Controlled Batch Commitment Engine with Real-Time Progress
+ *
  * Handles BOTH new investor creation AND transactions for existing investors.
  * When an investor already exists, only the transaction/unit update is applied.
+ * Reports live progress via onProgress after every meaningful committed step.
  */
 export async function commitInvestorBulkBatch(
   batch: StagedInvestorBatch,
   rowsToCommit: StagedInvestorRow[],
   targetAccount: InvestmentAccount,
   existingInvestors: Investor[],
-  enablePortalAccess: boolean = false
+  enablePortalAccess: boolean = false,
+  onProgress?: (progress: BulkCommitProgress) => void
 ): Promise<{ 
   createdInvestorsCount: number; 
   postedTransactionsCount: number; 
@@ -379,11 +409,37 @@ export async function commitInvestorBulkBatch(
   let portalInvitationsSent = 0;
   const postedTransactionIds: string[] = [];
 
-  // Map from rowNumber -> the resolved Investor object (either new or existing)
   const resolvedInvestorsMap = new Map<number, Investor>();
   const newInvestorsToSet: { ref: any; data: Investor }[] = [];
 
-  // PHASE 1: Resolve each row to either an EXISTING investor or a NEW investor
+  const totalRows = rowsToCommit.filter(r => r.status !== 'ERROR').length;
+  const hasFinancialData = rowsToCommit.some(r => (r.amount && r.amount > 0) || (r.calculatedUnits && r.calculatedUnits > 0) || (r.importedUnits && r.importedUnits > 0));
+  const phase2Total = (batch.importMode === 'MASTER_AND_INVESTMENT' || hasFinancialData) ? totalRows : 0;
+  const phase3Total = enablePortalAccess ? totalRows : 0;
+
+  const report = (phase: 1 | 2 | 3, current: number, total: number, lastItem?: BulkCommitProgress['lastItem']) => {
+    onProgress?.({
+      phase,
+      phaseName: phase === 1 ? 'Resolving Investors' : phase === 2 ? 'Posting Transactions' : 'Portal Provisioning',
+      phaseIcon: phase === 1 ? '🔍' : phase === 2 ? '📊' : '✉️',
+      current,
+      total,
+      successCount: createdInvestorsCount + postedTransactionsCount,
+      failCount: failedRowsCount,
+      phase1Total: totalRows,
+      phase1Done: phase >= 2 ? totalRows : current,
+      phase2Total,
+      phase2Done: phase === 2 ? current : phase === 3 ? phase2Total : 0,
+      phase3Total,
+      phase3Done: phase === 3 ? current : 0,
+      lastItem
+    });
+  };
+
+  // ── PHASE 1: Investor Resolution ──────────────────────────────────────────
+  report(1, 0, totalRows);
+
+  let resolvedCount = 0;
   for (const row of rowsToCommit) {
     if (row.status === 'ERROR') {
       failedRowsCount++;
@@ -393,36 +449,26 @@ export async function commitInvestorBulkBatch(
     try {
       let activeInvestor: Investor | undefined = undefined;
 
-      // First: check if row already matched an existing investor
+      // Priority match: matchedId → Email → Phone → Exact Name
       if (row.matchedInvestorId) {
         activeInvestor = existingInvestors.find(i => i.id === row.matchedInvestorId);
       }
-
-      // Second: try harder to find a match by email, phone or name
       if (!activeInvestor && row.email) {
-        activeInvestor = existingInvestors.find(i => 
-          i.email && i.email.toLowerCase() === row.email!.toLowerCase()
-        );
+        activeInvestor = existingInvestors.find(i => i.email && i.email.toLowerCase() === row.email!.toLowerCase());
       }
       if (!activeInvestor && row.phone) {
         const cleanPhone = row.phone.replace(/[^0-9]/g, '');
         if (cleanPhone.length >= 8) {
-          activeInvestor = existingInvestors.find(i =>
-            i.phone && i.phone.replace(/[^0-9]/g, '') === cleanPhone
-          );
+          activeInvestor = existingInvestors.find(i => i.phone && i.phone.replace(/[^0-9]/g, '') === cleanPhone);
         }
       }
       if (!activeInvestor && row.fullName) {
-        activeInvestor = existingInvestors.find(i =>
-          i.name.toLowerCase().trim() === row.fullName.toLowerCase().trim()
-        );
+        activeInvestor = existingInvestors.find(i => i.name.toLowerCase().trim() === row.fullName.toLowerCase().trim());
       }
 
       if (!activeInvestor) {
-        // Create a NEW investor document (no financial data yet — Phase 2 handles that)
         const newInvCode = row.investorId || `INV-${String(Math.floor(100000 + Math.random() * 900000))}`;
         const newInvRef = doc(collection(db, 'investors'));
-
         const newInvData: Investor = {
           id: newInvRef.id,
           investorId: newInvCode,
@@ -432,7 +478,6 @@ export async function commitInvestorBulkBatch(
           email: row.email || '',
           phone: row.phone || '',
           address: row.address || '',
-          // Start at 0 — Phase 2 will increment these via Firestore increment()
           unitsOwned: 0,
           totalInvestment: 0,
           currentValue: 0,
@@ -441,7 +486,6 @@ export async function commitInvestorBulkBatch(
           createdAt: new Date().toISOString(),
           createdBy: 'Bulk Investor Import'
         };
-
         newInvestorsToSet.push({ ref: newInvRef, data: newInvData });
         activeInvestor = newInvData;
         createdInvestorsCount++;
@@ -452,9 +496,16 @@ export async function commitInvestorBulkBatch(
       console.error(`Failed to resolve investor for row ${row.rowNumber}:`, err);
       failedRowsCount++;
     }
+
+    resolvedCount++;
+    // Yield to UI every 25 rows so the React state update can paint
+    if (resolvedCount % 25 === 0 || resolvedCount === totalRows) {
+      report(1, resolvedCount, totalRows);
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
   }
 
-  // Commit Phase 1 new investor docs in write batches (max 400 per batch)
+  // Commit new investor documents in batches of 400
   if (newInvestorsToSet.length > 0) {
     const BATCH_SIZE = 400;
     for (let i = 0; i < newInvestorsToSet.length; i += BATCH_SIZE) {
@@ -465,21 +516,20 @@ export async function commitInvestorBulkBatch(
     }
   }
 
-  // PHASE 2: Post financial transactions for ALL rows (new AND existing investors)
-  // importMode check: MASTER_AND_INVESTMENT processes subscriptions;
-  // MASTER_ONLY with amount data also processes (smart fallback)
-  const hasFinancialData = rowsToCommit.some(r => (r.amount && r.amount > 0) || (r.calculatedUnits && r.calculatedUnits > 0) || (r.importedUnits && r.importedUnits > 0));
+  // Mark Phase 1 complete
+  report(1, totalRows, totalRows);
 
+  // ── PHASE 2: Financial Transaction Posting ────────────────────────────────
   if (batch.importMode === 'MASTER_AND_INVESTMENT' || hasFinancialData) {
+    report(2, 0, phase2Total);
+
     const recordsToPost: StagedTransactionRecord[] = [];
 
     rowsToCommit.forEach(row => {
       if (row.status === 'ERROR') return;
-
       const inv = resolvedInvestorsMap.get(row.rowNumber);
-      if (!inv) return; // Skip rows that failed investor resolution
+      if (!inv) return;
 
-      // Determine units to use (prefer ACCEPT_IMPORTED if discrepancy action set, else calculated)
       const unitsToUse = (row.discrepancyAction === 'ACCEPT_IMPORTED' && row.importedUnits && row.importedUnits > 0)
         ? row.importedUnits
         : (row.calculatedUnits && row.calculatedUnits > 0
@@ -496,10 +546,8 @@ export async function commitInvestorBulkBatch(
             ? roundMoney(unitsToUse * row.applicableNav)
             : 0);
 
-      // Must have EITHER units OR amount to proceed
       if (unitsToUse <= 0 && amountToUse <= 0) return;
 
-      // Must have a valid NAV — default to 1.0000 if fund has no NAV set
       const nav = (row.applicableNav && row.applicableNav > 0) ? row.applicableNav : (targetAccount.nav || 1.0000);
       const validDate = row.transactionDate || new Date().toISOString().split('T')[0];
       const txType = row.transactionType || 'Subscription';
@@ -526,8 +574,6 @@ export async function commitInvestorBulkBatch(
     });
 
     if (recordsToPost.length > 0) {
-      // CRITICAL: Pass ALL resolved investors (both new and existing) to postTransactionBatch
-      // so it can find each investor by matchedInvestorId
       const allInvestorsForPosting = Array.from(resolvedInvestorsMap.values());
 
       const postResult = await postTransactionBatch(
@@ -547,16 +593,29 @@ export async function commitInvestorBulkBatch(
         },
         recordsToPost,
         targetAccount,
-        allInvestorsForPosting
+        allInvestorsForPosting,
+        // Inner progress: wrap as Phase 2 reports
+        (success, fail, total, lastItem) => {
+          postedTransactionsCount = success;
+          report(2, success, total, lastItem ? {
+            name: lastItem.name,
+            amount: lastItem.amount,
+            units: lastItem.units,
+            nav: lastItem.nav,
+            txDate: lastItem.txDate
+          } : undefined);
+        }
       );
 
       postedTransactionsCount = postResult.successCount;
+      failedRowsCount += postResult.failureCount;
       postedTransactionIds.push(...postResult.postedTransactionIds);
     }
   }
 
-  // PHASE 3: Portal Provisioning (Non-blocking Parallel)
+  // ── PHASE 3: Portal Provisioning ──────────────────────────────────────────
   if (enablePortalAccess) {
+    report(3, 0, phase3Total);
     const invList = Array.from(resolvedInvestorsMap.values()).filter(i => i.email && i.email.includes('@'));
     const provPromises = invList.map(inv => approveInvestorAndEnablePortal(inv.id, 'Bulk Import Auto-Provision').catch(err => {
       console.warn(`Portal provisioning failed for ${inv.email}:`, err);
@@ -564,13 +623,9 @@ export async function commitInvestorBulkBatch(
     }));
     const results = await Promise.allSettled(provPromises);
     portalInvitationsSent = results.filter(r => r.status === 'fulfilled' && (r.value as any)?.investor).length;
+    report(3, portalInvitationsSent, phase3Total);
   }
 
-  return {
-    createdInvestorsCount,
-    postedTransactionsCount,
-    failedRowsCount,
-    postedTransactionIds,
-    portalInvitationsSent
-  };
+  return { createdInvestorsCount, postedTransactionsCount, failedRowsCount, postedTransactionIds, portalInvitationsSent };
 }
+
