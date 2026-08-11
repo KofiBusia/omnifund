@@ -337,13 +337,13 @@ export function analyseAndStageBatch(
       warningOrError = 'Transaction amount must be greater than zero';
     }
 
-    // Validate Investor Match
+    // Validate Investor Match - Auto-accept fuzzy matches & auto-stage unmatched for auto-creation on post
     if (status !== 'ERROR' && matchResult.matchStatus === 'UNMATCHED') {
-      status = 'WARNING';
-      warningOrError = 'Investor profile not matched in registry';
+      status = 'READY';
+      warningOrError = 'New Investor (Will auto-create profile on post)';
     } else if (status !== 'ERROR' && matchResult.matchStatus === 'REVIEW') {
-      status = 'WARNING';
-      warningOrError = matchResult.matchReason || 'Investor match requires user confirmation';
+      status = 'READY';
+      warningOrError = matchResult.matchReason || 'Fuzzy match auto-resolved';
     }
 
     // Check Redemption Limit if matched
@@ -366,7 +366,7 @@ export function analyseAndStageBatch(
     }
 
     if (status === 'ERROR') errorRowsCount++;
-    else if (status === 'WARNING' || status === 'NAV_REQUIRED' || status === 'DUPLICATE' || matchResult.matchStatus === 'REVIEW') reviewRowsCount++;
+    else if (status === 'NAV_REQUIRED' || status === 'DUPLICATE') reviewRowsCount++;
     else validRowsCount++;
 
     totalAmount += (isNaN(rawAmount) ? 0 : rawAmount);
@@ -465,12 +465,35 @@ export async function postTransactionBatch(
         ? record.rawAmount
         : roundMoney(unitsToIssue * (record.applicableNav || 1.0000));
 
-      if (!record.matchedInvestorId || !record.validatedDate || !record.applicableNav || (unitsToIssue <= 0 && grossAmount <= 0)) {
-        failureCount++;
-        continue;
+      let investor = investors.find(i => i.id === record.matchedInvestorId);
+      if (!investor && record.rawInvestor) {
+        // Auto-create missing investor profile in Firestore
+        const newInvRef = doc(collection(db, 'investors'));
+        const newInvCode = `INV-${Math.floor(100000 + Math.random() * 900000)}`;
+        const defaultEmail = `${record.rawInvestor.toLowerCase().replace(/[^a-z0-9]/g, '.')}@fund.local`;
+        const newInvData: Investor = {
+          id: newInvRef.id,
+          investorId: newInvCode,
+          uid: '',
+          accountId: account.id,
+          name: record.rawInvestor,
+          email: defaultEmail,
+          phone: '',
+          address: '',
+          unitsOwned: 0,
+          totalInvestment: 0,
+          currentValue: 0,
+          kycStatus: 'verified',
+          portalStatus: 'NOT_ENABLED',
+          createdAt: new Date().toISOString(),
+          createdBy: 'Bulk Transaction Upload'
+        };
+        batchOp.set(newInvRef, newInvData);
+        investor = newInvData;
+        investors.push(newInvData);
+        record.matchedInvestorId = newInvRef.id;
       }
 
-      const investor = investors.find(i => i.id === record.matchedInvestorId);
       if (!investor) {
         failureCount++;
         continue;

@@ -30,6 +30,7 @@ interface BulkTransactionModalProps {
   accounts: InvestmentAccount[];
   valuations: any[];
   portfolio?: any[];
+  onSuccess?: () => void;
 }
 
 interface BulkRow {
@@ -47,7 +48,7 @@ interface ProcessedRow extends BulkRow {
   status: 'valid' | 'invalid';
 }
 
-export default function BulkTransactionModal({ isOpen, onClose, investors, accounts, valuations, portfolio = [] }: BulkTransactionModalProps) {
+export default function BulkTransactionModal({ isOpen, onClose, investors, accounts, valuations, portfolio = [], onSuccess }: BulkTransactionModalProps) {
   const [processedRows, setProcessedRows] = useState<ProcessedRow[]>([]);
   const [selectedAccountId, setSelectedAccountId] = useState<string>(accounts[0]?.id || '');
   const [bulkDate, setBulkDate] = useState<string>(new Date().toISOString().split('T')[0]);
@@ -301,6 +302,10 @@ export default function BulkTransactionModal({ isOpen, onClose, investors, accou
     }
 
     setIsProcessing(false);
+    toast.success(`✅ Posted ${completed} bulk transaction(s) successfully!`);
+    if (onSuccess) onSuccess();
+    onClose();
+    setProcessedRows([]);
   };
 
   if (!isOpen) return null;

@@ -16,6 +16,7 @@ import {
 } from '../services/transactionProcessingEngine';
 import { reconcileFundState, roundMoney, roundUnits } from '../services/fundAccountingEngine';
 import { downloadTransactionRegistryTemplate } from '../services/csvTemplateService';
+import { runGlobalValuation } from '../services/valuationService';
 import TransactionHistory from './TransactionHistory';
 import BatchDeleteByDateModal from './BatchDeleteByDateModal';
 import { 
@@ -229,10 +230,10 @@ export default function TransactionModule({
   };
 
   // Execute Stage 2 Atomic Batch Posting
-  const handleConfirmPosting = async () => {
+  const handleConfirmPosting = async (overrideRecords?: StagedTransactionRecord[]) => {
     if (!stagedBatch || !activeAccount) return;
 
-    const readyRecords = stagedBatch.stagedRecords.filter(r => r.status === 'READY');
+    const readyRecords = overrideRecords || stagedBatch.stagedRecords.filter(r => r.status === 'READY');
     if (readyRecords.length === 0) {
       toast.error('No ready records to post. Please resolve warnings/errors.');
       return;
@@ -247,6 +248,9 @@ export default function TransactionModule({
       setPostingProgress(100);
       toast.success(`Successfully posted ${res.successCount} transactions. ${res.failureCount} failed.`, { id: toastId });
 
+      // Run global valuation so account NAV/AUM and investor balances immediately refresh on screen
+      runGlobalValuation().catch(() => {});
+
       setStagedBatch(null);
       setActiveSubTab('register');
     } catch (err: any) {
@@ -255,6 +259,18 @@ export default function TransactionModule({
     } finally {
       setIsPosting(false);
     }
+  };
+
+  // 1-Click Auto Approve All Non-Error Rows & Post Immediately
+  const handleAutoApproveAndPostAll = () => {
+    if (!stagedBatch) return;
+    const allNonError = stagedBatch.stagedRecords.map(r => r.status === 'ERROR' ? r : { ...r, status: 'READY' as const });
+    const readyRecords = allNonError.filter(r => r.status === 'READY');
+    if (readyRecords.length === 0) {
+      toast.error('No valid records to post.');
+      return;
+    }
+    handleConfirmPosting(readyRecords);
   };
 
   return (
@@ -533,17 +549,17 @@ export default function TransactionModule({
                   </span>
                   <button 
                     onClick={() => setStagedBatch(null)}
-                    className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold rounded-xl transition-all"
+                    className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold rounded-xl transition-all"
                   >
                     Clear Batch
                   </button>
                   <button 
-                    onClick={handleConfirmPosting}
-                    disabled={isPosting || stagedBatch.validRows === 0}
-                    className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-bold rounded-xl transition-all shadow-lg shadow-emerald-600/20 flex items-center gap-2"
+                    onClick={handleAutoApproveAndPostAll}
+                    disabled={isPosting || (stagedBatch.totalRows - stagedBatch.errorRows === 0)}
+                    className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-bold rounded-xl transition-all shadow-lg shadow-emerald-600/30 flex items-center gap-2"
                   >
-                    {isPosting ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
-                    Post {stagedBatch.validRows} Approved Records
+                    {isPosting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4 text-amber-300" />}
+                    Post All {stagedBatch.totalRows - stagedBatch.errorRows} Records (Instant 1-Click)
                   </button>
                 </div>
               </div>

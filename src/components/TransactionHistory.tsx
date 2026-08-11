@@ -379,7 +379,8 @@ export default function TransactionHistory({
                 const investor = lookups.investorMap.get(t.investorId);
                 const account = lookups.accountMap.get(t.accountId);
                 const tDate = safeDate(t.timestamp);
-                const isNew = tDate ? (Date.now() - tDate.getTime() < 30000) : false;
+                const createdTime = safeTimestamp((t as any).createdAt || t.timestamp);
+                const isNew = createdTime > 0 && (Date.now() - createdTime < 10 * 60 * 1000);
                 
                 return (
                   <motion.tr 
@@ -407,7 +408,7 @@ export default function TransactionHistory({
                           {safeFormatDate(t.timestamp)}
                           <span className="text-[10px] text-emerald-500 font-mono font-bold">@{formatCurrency(t.pricePerUnit)}</span>
                           {isNew && (
-                            <span className="text-[8px] bg-emerald-500 text-white px-1 rounded font-bold animate-pulse">NEW</span>
+                            <span className="text-[8px] bg-emerald-500 text-white px-1.5 py-0.5 rounded font-bold animate-pulse">POSTED</span>
                           )}
                         </span>
                         <span className="text-[10px] text-slate-500">
