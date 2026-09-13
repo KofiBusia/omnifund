@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: omnifund
+    runtime: docker
+    plan: free
+    envVars:
+      - key: APP_URL
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false

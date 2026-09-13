@@ -1,0 +1,8 @@
+Flask>=3.0
+requests>=2.31
+python-dotenv>=1.0
+google-auth>=2.34
+google-auth-oauthlib>=1.2
+google-api-python-client>=2.140
+google-genai>=1.0
+gunicorn>=22.0
