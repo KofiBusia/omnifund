@@ -194,10 +194,10 @@ export default function StaffManagement({ currentUser, role, isDemoMode }: Staff
     }
   };
 
-  const isSuperAdminUser = role === 'superadmin' || currentUser?.email === 'emmanuelagbanyo8@gmail.com';
+  const isSuperAdminUser = role === 'superadmin';
 
   const handleToggleStatus = async (staffMember: UserProfile) => {
-    if (staffMember.role === 'superadmin' || staffMember.email === 'emmanuelagbanyo8@gmail.com') {
+    if (staffMember.role === 'superadmin') {
       toast.error('Security Restriction: Superadmin master accounts cannot be suspended.');
       return;
     }
@@ -223,7 +223,7 @@ export default function StaffManagement({ currentUser, role, isDemoMode }: Staff
   };
 
   const handleDeleteStaff = async (staffMember: UserProfile) => {
-    if (staffMember.role === 'superadmin' || staffMember.email === 'emmanuelagbanyo8@gmail.com') {
+    if (staffMember.role === 'superadmin') {
       toast.error('Security Restriction: Superadmin master accounts cannot be removed.');
       return;
     }
@@ -444,7 +444,7 @@ export default function StaffManagement({ currentUser, role, isDemoMode }: Staff
                     </td>
                     <td className="p-4 pr-6 text-right">
                       <div className="flex items-center justify-end gap-2">
-                        {staffMember.role === 'superadmin' || staffMember.email === 'emmanuelagbanyo8@gmail.com' ? (
+                        {staffMember.role === 'superadmin' ? (
                           <span className="px-3 py-1.5 rounded-xl text-[11px] font-bold bg-purple-500/10 text-purple-300 border border-purple-500/30 flex items-center gap-1.5 shadow-sm">
                             <ShieldCheck className="w-3.5 h-3.5 text-purple-400" />
                             <span>Master Admin</span>

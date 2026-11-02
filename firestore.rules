@@ -16,24 +16,15 @@ service cloud.firestore {
     }
 
     function isSuperAdmin() {
-      return isSignedIn() && (
-        request.auth.token.email == 'emmanuelagbanyo8@gmail.com' ||
-        (userExists() && userDoc().role == 'superadmin')
-      );
+      return isSignedIn() && userExists() && userDoc().role == 'superadmin';
     }
 
     function isAdmin() {
-      return isSignedIn() && (
-        request.auth.token.email == 'emmanuelagbanyo8@gmail.com' ||
-        (userExists() && userDoc().role in ['admin', 'superadmin'])
-      );
+      return isSignedIn() && userExists() && userDoc().role in ['admin', 'superadmin'];
     }
 
     function isStaff() {
-      return isSignedIn() && (
-        request.auth.token.email == 'emmanuelagbanyo8@gmail.com' ||
-        (userExists() && userDoc().role in ['admin', 'superadmin', 'staff', 'support'])
-      );
+      return isSignedIn() && userExists() && userDoc().role in ['admin', 'superadmin', 'staff', 'support'];
     }
 
     function isInvestorOwner() {
@@ -140,8 +131,16 @@ service cloud.firestore {
     // ── User Profiles ────────────────────────────────────────────────
     match /users/{userId} {
       allow read: if isSignedIn() && (request.auth.uid == userId || isStaff());
-      allow create: if isSignedIn();
-      allow update: if isSignedIn() && (request.auth.uid == userId || isAdmin());
+      // Self-registration may only claim 'admin' or 'investor' (the roles the Login UI offers) —
+      // never 'superadmin'/'staff'/'support'.
+      allow create: if isSignedIn() && request.auth.uid == userId &&
+        request.resource.data.role in ['admin', 'investor'];
+      // Users may update their own profile but not their own role — role changes (including
+      // promotions to staff/support/superadmin) require an existing admin.
+      allow update: if isSignedIn() && (
+        (request.auth.uid == userId && request.resource.data.role == resource.data.role) ||
+        isAdmin()
+      );
       allow delete: if isSuperAdmin();
     }
 
