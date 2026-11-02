@@ -361,18 +361,18 @@ export default function App() {
   }
 
   const navItems = [
-    { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, roles: ['superadmin', 'admin', 'staff', 'support', 'investor'] },
-    { id: 'accounts', label: 'Accounts', icon: PieChart, roles: ['superadmin', 'admin', 'staff'] },
-    { id: 'investors', label: 'Investors', icon: Users, roles: ['superadmin', 'admin', 'staff', 'support'] },
-    { id: 'transactions', label: 'Transactions', icon: ArrowLeftRight, roles: ['superadmin', 'admin', 'staff', 'support'] },
-    { id: 'portfolio', label: 'Portfolio', icon: Briefcase, roles: ['superadmin', 'admin', 'staff', 'investor'] },
-    { id: 'analytics', label: 'Analytics', icon: Activity, roles: ['superadmin', 'admin', 'staff', 'investor'] },
-    { id: 'ingestion', label: 'Ingestion', icon: Cpu, roles: ['superadmin', 'admin', 'staff'] },
+    { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, roles: ['superadmin', 'admin', 'staff', 'support', 'viewer', 'entry', 'approver', 'investor'] },
+    { id: 'accounts', label: 'Accounts', icon: PieChart, roles: ['superadmin', 'admin', 'staff', 'viewer'] },
+    { id: 'investors', label: 'Investors', icon: Users, roles: ['superadmin', 'admin', 'staff', 'support', 'viewer', 'entry', 'approver'] },
+    { id: 'transactions', label: 'Transactions', icon: ArrowLeftRight, roles: ['superadmin', 'admin', 'staff', 'support', 'viewer', 'entry', 'approver'] },
+    { id: 'portfolio', label: 'Portfolio', icon: Briefcase, roles: ['superadmin', 'admin', 'staff', 'viewer', 'investor'] },
+    { id: 'analytics', label: 'Analytics', icon: Activity, roles: ['superadmin', 'admin', 'staff', 'viewer', 'entry', 'approver', 'investor'] },
+    { id: 'ingestion', label: 'Ingestion', icon: Cpu, roles: ['superadmin', 'admin', 'staff', 'entry', 'approver'] },
     { id: 'valuation', label: 'Valuation', icon: TrendingUp, roles: ['superadmin', 'admin', 'staff'] },
-    { id: 'statements', label: 'Statements', icon: FileText, roles: ['superadmin', 'admin', 'staff', 'support', 'investor'] },
+    { id: 'statements', label: 'Statements', icon: FileText, roles: ['superadmin', 'admin', 'staff', 'support', 'viewer', 'entry', 'approver', 'investor'] },
     { id: 'staff', label: 'Staff Logins', icon: ShieldCheck, roles: ['superadmin', 'admin'] },
-    { id: 'support', label: 'Support Center', icon: Headphones, roles: ['superadmin', 'admin', 'staff', 'support', 'investor'] },
-    { id: 'settings', label: 'Settings', icon: Settings, roles: ['superadmin', 'admin', 'staff', 'support', 'investor'] },
+    { id: 'support', label: 'Support Center', icon: Headphones, roles: ['superadmin', 'admin', 'staff', 'support', 'viewer', 'entry', 'approver', 'investor'] },
+    { id: 'settings', label: 'Settings', icon: Settings, roles: ['superadmin', 'admin', 'staff', 'support', 'viewer', 'entry', 'approver', 'investor'] },
   ];
 
   const filteredNavItems = navItems.filter(item => item.roles.includes(role || ''));

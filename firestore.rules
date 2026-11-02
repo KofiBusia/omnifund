@@ -27,6 +27,30 @@ service cloud.firestore {
       return isSignedIn() && userExists() && userDoc().role in ['admin', 'superadmin', 'staff', 'support'];
     }
 
+    // Data-entry clerks: may stage/create fund-side records but not approve or finalize them.
+    function isEntry() {
+      return isSignedIn() && userExists() && userDoc().role in ['entry', 'staff', 'admin', 'superadmin'];
+    }
+
+    // Approvers: may approve/post/finalize records created by entry clerks, but this role alone
+    // does not grant creation rights (separation of duties).
+    function isApprover() {
+      return isSignedIn() && userExists() && userDoc().role in ['approver', 'staff', 'admin', 'superadmin'];
+    }
+
+    // Any internal fund-side user (as opposed to an external investor) — the baseline "viewing" right.
+    function isInternal() {
+      return isSignedIn() && userExists() && userDoc().role in
+        ['viewer', 'entry', 'approver', 'staff', 'support', 'admin', 'superadmin'];
+    }
+
+    // Roles an admin is allowed to grant to another user from the client. 'superadmin' is
+    // deliberately excluded — it can only be granted by editing Firestore directly in the
+    // Firebase Console, never via the app.
+    function isAssignableRole(r) {
+      return r in ['admin', 'staff', 'support', 'viewer', 'entry', 'approver', 'investor'];
+    }
+
     function isInvestorOwner() {
       return isSignedIn() && (
         resource != null && resource.data.uid == request.auth.uid
@@ -49,29 +73,30 @@ service cloud.firestore {
 
     // ── Investors ─────────────────────────────────────────────────────
     match /investors/{investorId} {
-      allow read: if isSignedIn() && (isStaff() || isInvestorOwner());
-      // Any signed-in user can create (covers bulk upload creating new investors)
-      allow create: if isSignedIn();
-      // Staff or the investor themselves can update their own profile
-      allow update: if isSignedIn() && (isStaff() || isInvestorOwner());
+      allow read: if isSignedIn() && (isInternal() || isInvestorOwner());
+      // Entry clerks, staff/admin can create (covers bulk upload creating new investors)
+      allow create: if isEntry();
+      // Staff/approvers can update records; the investor themselves can update their own profile
+      allow update: if isSignedIn() && (isStaff() || isApprover() || isInvestorOwner());
       allow delete: if isAdmin();
     }
 
     // ── Transactions ─────────────────────────────────────────────────
     match /transactions/{transactionId} {
-      allow read: if isSignedIn() && (isStaff() ||
+      allow read: if isSignedIn() && (isInternal() ||
         (resource != null &&
          get(/databases/$(database)/documents/investors/$(resource.data.investorId)).data.uid == request.auth.uid));
-      // Any signed-in user can create (covers bulk upload posting subscriptions)
-      allow create: if isSignedIn();
-      allow update, delete: if isStaff();
+      // Entry clerks, staff/admin can stage new transactions (covers bulk upload posting subscriptions)
+      allow create: if isEntry();
+      // Only approvers/staff/admin can approve, post, or delete a transaction
+      allow update, delete: if isStaff() || isApprover();
     }
 
     // ── Unit Movement Ledger ─────────────────────────────────────────
     // Written by bulk upload engine on every subscription/redemption
     match /unit_ledger/{ledgerId} {
-      allow read: if isStaff();
-      allow create: if isSignedIn();
+      allow read: if isInternal();
+      allow create: if isEntry();
       allow update, delete: if isAdmin();
     }
 
@@ -105,16 +130,16 @@ service cloud.firestore {
     // ── Portal Invitations ───────────────────────────────────────────
     // Written by bulk upload portal provisioning phase
     match /portal_invitations/{invId} {
-      allow read: if isStaff() || (isSignedIn() && resource != null && resource.data.email == request.auth.token.email);
-      allow create: if isSignedIn();
-      allow update: if isSignedIn() && (isStaff() || (resource != null && resource.data.email == request.auth.token.email));
+      allow read: if isInternal() || (isSignedIn() && resource != null && resource.data.email == request.auth.token.email);
+      allow create: if isEntry();
+      allow update: if isSignedIn() && (isStaff() || isApprover() || (resource != null && resource.data.email == request.auth.token.email));
       allow delete: if isAdmin();
     }
 
     // ── Portal Invitation Audit Logs ─────────────────────────────────
     match /portal_invitation_logs/{logId} {
-      allow read: if isStaff();
-      allow create: if isSignedIn();
+      allow read: if isInternal();
+      allow create: if isEntry();
       allow update, delete: if isAdmin();
     }
 
@@ -131,23 +156,25 @@ service cloud.firestore {
     // ── User Profiles ────────────────────────────────────────────────
     match /users/{userId} {
       allow read: if isSignedIn() && (request.auth.uid == userId || isStaff());
-      // Self-registration may only claim 'admin' or 'investor' (the roles the Login UI offers) —
-      // never 'superadmin'/'staff'/'support'.
-      allow create: if isSignedIn() && request.auth.uid == userId &&
-        request.resource.data.role in ['admin', 'investor'];
-      // Users may update their own profile but not their own role — role changes (including
-      // promotions to staff/support/superadmin) require an existing admin.
+      allow create: if isSignedIn() && (
+        // Self-registration may only claim 'admin' or 'investor' (the roles the Login UI offers).
+        (request.auth.uid == userId && request.resource.data.role in ['admin', 'investor']) ||
+        // An admin provisioning a login for someone else may assign any non-superadmin role.
+        (isAdmin() && isAssignableRole(request.resource.data.role))
+      );
+      // Users may update their own profile but not their own role. An admin may change anyone's
+      // role except to grant 'superadmin', which stays console-only.
       allow update: if isSignedIn() && (
         (request.auth.uid == userId && request.resource.data.role == resource.data.role) ||
-        isAdmin()
+        (isAdmin() && isAssignableRole(request.resource.data.role))
       );
       allow delete: if isSuperAdmin();
     }
 
     // ── Batch Import Audit Records ───────────────────────────────────
     match /import_batches/{batchId} {
-      allow read: if isStaff();
-      allow create: if isSignedIn();
+      allow read: if isInternal();
+      allow create: if isEntry();
       allow update, delete: if isAdmin();
     }
 

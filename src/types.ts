@@ -209,7 +209,7 @@ export interface AssetValuation {
   notes?: string;
 }
 
-export type UserRoleType = 'superadmin' | 'admin' | 'staff' | 'support' | 'investor';
+export type UserRoleType = 'superadmin' | 'admin' | 'staff' | 'support' | 'viewer' | 'entry' | 'approver' | 'investor';
 
 export interface UserRole {
   uid: string;

@@ -21,11 +21,15 @@ import {
   Clock,
   ChevronRight,
   UserCheck,
-  Lock
+  Lock,
+  Eye,
+  PenLine,
+  Copy
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { collection, getDocs, doc, setDoc, updateDoc, deleteDoc, serverTimestamp, query, orderBy } from 'firebase/firestore';
 import { db } from '../firebase';
+import firebaseConfig from '../../firebase-applet-config.json';
 import { UserProfile, UserRoleType } from '../types';
 import { toast } from 'sonner';
 
@@ -33,6 +37,33 @@ interface StaffManagementProps {
   currentUser: any;
   role: string | null;
   isDemoMode: boolean;
+}
+
+// Generates a strong temporary password for a newly-provisioned staff login.
+function generateTempPassword(): string {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#%&*';
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => chars[b % chars.length]).join('');
+}
+
+// Creates a real Firebase Auth account via the public Identity Toolkit REST API, using the
+// client's own publishable web API key. This does NOT use the Firebase Auth SDK, so it does
+// not switch the currently-signed-in admin's session over to the new account.
+async function createFirebaseAuthAccount(email: string, password: string): Promise<string> {
+  const res = await fetch(
+    `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${firebaseConfig.apiKey}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password, returnSecureToken: true })
+    }
+  );
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error?.message || 'Failed to create login credentials');
+  }
+  return data.localId as string;
 }
 
 const SAMPLE_STAFF: UserProfile[] = [
@@ -85,6 +116,8 @@ export default function StaffManagement({ currentUser, role, isDemoMode }: Staff
   const [roleFilter, setRoleFilter] = useState<string>('all');
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [editingStaff, setEditingStaff] = useState<UserProfile | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
+  const [newCredentials, setNewCredentials] = useState<{ email: string; password: string } | null>(null);
 
   // Form State
   const [formData, setFormData] = useState({
@@ -145,27 +178,45 @@ export default function StaffManagement({ currentUser, role, isDemoMode }: Staff
       toast.error('Please complete all required fields');
       return;
     }
+    if (formData.role === 'superadmin' && editingStaff?.role !== 'superadmin') {
+      toast.error('Superadmin cannot be granted from this screen — it must be set directly in the Firebase Console.');
+      return;
+    }
 
+    setIsSaving(true);
     try {
-      const targetUid = editingStaff ? editingStaff.uid : `staff-${Date.now()}`;
+      let targetUid = editingStaff?.uid;
+      let generatedPassword: string | null = null;
+
+      if (!editingStaff) {
+        if (isDemoMode) {
+          targetUid = `staff-${Date.now()}`;
+        } else {
+          // Provision a real, working login — not just a Firestore profile doc.
+          generatedPassword = generateTempPassword();
+          targetUid = await createFirebaseAuthAccount(formData.email, generatedPassword);
+        }
+      }
+
       const payload: UserProfile = {
-        uid: targetUid,
+        uid: targetUid!,
         email: formData.email,
         displayName: formData.displayName,
         role: formData.role,
         department: formData.department,
         isActive: formData.isActive,
         createdAt: editingStaff ? editingStaff.createdAt : new Date().toISOString(),
-        createdBy: currentUser?.displayName || currentUser?.email || 'Superadmin'
+        createdBy: currentUser?.displayName || currentUser?.email || 'Admin'
       };
 
       if (!isDemoMode) {
-        await setDoc(doc(db, 'users', targetUid), {
+        await setDoc(doc(db, 'users', targetUid!), {
           email: formData.email,
           displayName: formData.displayName,
           role: formData.role,
           department: formData.department,
           isActive: formData.isActive,
+          isDemo: false,
           updatedAt: serverTimestamp(),
           ...(editingStaff ? {} : { createdAt: serverTimestamp(), createdBy: currentUser?.email })
         }, { merge: true });
@@ -177,6 +228,9 @@ export default function StaffManagement({ currentUser, role, isDemoMode }: Staff
       } else {
         setStaffList(prev => [payload, ...prev]);
         toast.success(`Created staff login for ${formData.displayName} as ${formData.role.toUpperCase()}`);
+        if (generatedPassword) {
+          setNewCredentials({ email: formData.email, password: generatedPassword });
+        }
       }
 
       setIsAddModalOpen(false);
@@ -191,6 +245,8 @@ export default function StaffManagement({ currentUser, role, isDemoMode }: Staff
     } catch (err: any) {
       console.error('Error saving staff:', err);
       toast.error(err.message || 'Failed to save staff profile');
+    } finally {
+      setIsSaving(false);
     }
   };
 
@@ -274,6 +330,12 @@ export default function StaffManagement({ currentUser, role, isDemoMode }: Staff
         return <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-amber-500/10 text-amber-400 border border-amber-500/30 flex items-center gap-1 w-fit"><Shield className="w-3.5 h-3.5" /> Fund Admin</span>;
       case 'support':
         return <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-cyan-500/10 text-cyan-400 border border-cyan-500/30 flex items-center gap-1 w-fit"><Headphones className="w-3.5 h-3.5" /> Support Specialist</span>;
+      case 'viewer':
+        return <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-slate-500/10 text-slate-300 border border-slate-500/30 flex items-center gap-1 w-fit"><Eye className="w-3.5 h-3.5" /> Viewer (Read-Only)</span>;
+      case 'entry':
+        return <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-blue-500/10 text-blue-400 border border-blue-500/30 flex items-center gap-1 w-fit"><PenLine className="w-3.5 h-3.5" /> Data Entry Clerk</span>;
+      case 'approver':
+        return <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-pink-500/10 text-pink-400 border border-pink-500/30 flex items-center gap-1 w-fit"><CheckCircle2 className="w-3.5 h-3.5" /> Approver</span>;
       default:
         return <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 flex items-center gap-1 w-fit"><Briefcase className="w-3.5 h-3.5" /> Operations Staff</span>;
     }
@@ -364,6 +426,9 @@ export default function StaffManagement({ currentUser, role, isDemoMode }: Staff
             <option value="admin">Fund Admin</option>
             <option value="staff">Operations Staff</option>
             <option value="support">Support Specialist</option>
+            <option value="approver">Approver</option>
+            <option value="entry">Data Entry Clerk</option>
+            <option value="viewer">Viewer (Read-Only)</option>
           </select>
         </div>
       </div>
@@ -568,12 +633,16 @@ export default function StaffManagement({ currentUser, role, isDemoMode }: Staff
                     <select
                       value={formData.role}
                       onChange={(e) => setFormData({ ...formData, role: e.target.value as UserRoleType })}
-                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-purple-500 outline-none"
+                      disabled={editingStaff?.role === 'superadmin'}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-purple-500 outline-none disabled:opacity-50"
                     >
-                      <option value="staff">Operations Staff</option>
+                      <option value="viewer">Viewer (Read-Only)</option>
+                      <option value="entry">Data Entry Clerk</option>
+                      <option value="approver">Approver</option>
                       <option value="support">Support Specialist</option>
+                      <option value="staff">Operations Staff</option>
                       <option value="admin">Fund Manager (Admin)</option>
-                      <option value="superadmin">Super Admin</option>
+                      <option value="superadmin" disabled>Super Admin (Console-Only)</option>
                     </select>
                   </div>
 
@@ -596,17 +665,26 @@ export default function StaffManagement({ currentUser, role, isDemoMode }: Staff
                   <p className="font-bold text-purple-400 flex items-center gap-1.5">
                     <Sparkles className="w-3.5 h-3.5" /> Permissions Overview:
                   </p>
+                  {formData.role === 'viewer' && (
+                    <p className="text-slate-400">Read-only access to investors, transactions, portfolio, and analytics. Cannot create, edit, approve, or delete anything.</p>
+                  )}
+                  {formData.role === 'entry' && (
+                    <p className="text-slate-400">Can stage new investor records and transactions (data entry). Cannot approve, post, or delete them — a separate approver must finalize.</p>
+                  )}
+                  {formData.role === 'approver' && (
+                    <p className="text-slate-400">Can review and approve/post transactions and investor records staged by entry clerks, and read everything. Cannot create new staged entries.</p>
+                  )}
                   {formData.role === 'support' && (
                     <p className="text-slate-400">Can view investor query tickets, respond to support messages, and manage statement requests.</p>
                   )}
                   {formData.role === 'staff' && (
-                    <p className="text-slate-400">Full operational access to investor records, transaction processing, statements, and support ticketing.</p>
+                    <p className="text-slate-400">Full operational access to investor records, transaction processing, statements, and support ticketing (includes both entry and approval rights).</p>
                   )}
                   {formData.role === 'admin' && (
                     <p className="text-slate-400">Full administrative powers including NAV valuation updates, ingestion engine, accounts, and reports.</p>
                   )}
                   {formData.role === 'superadmin' && (
-                    <p className="text-slate-400">Master access including staff credential creation, role assignments, system backups, and security settings.</p>
+                    <p className="text-slate-400">Master access. Cannot be granted here — superadmin is set directly in the Firebase Console.</p>
                   )}
                 </div>
 
@@ -620,12 +698,74 @@ export default function StaffManagement({ currentUser, role, isDemoMode }: Staff
                   </button>
                   <button
                     type="submit"
-                    className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-purple-600 to-emerald-600 hover:from-purple-500 hover:to-emerald-500 text-white font-bold text-xs shadow-lg shadow-purple-900/30 flex items-center gap-2"
+                    disabled={isSaving}
+                    className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-purple-600 to-emerald-600 hover:from-purple-500 hover:to-emerald-500 text-white font-bold text-xs shadow-lg shadow-purple-900/30 flex items-center gap-2 disabled:opacity-60"
                   >
-                    <span>{editingStaff ? 'Update Staff Member' : 'Create Credentials'}</span>
+                    <span>{isSaving ? 'Saving...' : editingStaff ? 'Update Staff Member' : 'Create Credentials'}</span>
                   </button>
                 </div>
               </form>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* One-time credentials reveal — this password is never stored or shown again */}
+      <AnimatePresence>
+        {newCredentials && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4"
+          >
+            <motion.div
+              initial={{ scale: 0.95, y: 10 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.95, y: 10 }}
+              className="bg-slate-900 border border-emerald-700/40 rounded-3xl max-w-md w-full p-6 md:p-8 shadow-2xl"
+            >
+              <div className="flex items-center gap-3 mb-4">
+                <div className="p-2.5 rounded-2xl bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                  <Key className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-white">Login Created</h3>
+                  <p className="text-xs text-slate-400">Share these credentials securely — this password will not be shown again.</p>
+                </div>
+              </div>
+
+              <div className="space-y-3">
+                <div className="bg-slate-950 border border-slate-800 rounded-xl p-3">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 block mb-1">Email</span>
+                  <span className="text-sm text-white font-mono">{newCredentials.email}</span>
+                </div>
+                <div className="bg-slate-950 border border-slate-800 rounded-xl p-3 flex items-center justify-between gap-3">
+                  <div>
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 block mb-1">Temporary Password</span>
+                    <span className="text-sm text-white font-mono">{newCredentials.password}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      navigator.clipboard.writeText(newCredentials.password);
+                      toast.success('Password copied to clipboard');
+                    }}
+                    className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 shrink-0"
+                    title="Copy password"
+                  >
+                    <Copy className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setNewCredentials(null)}
+                className="mt-6 w-full px-4 py-2.5 rounded-xl bg-gradient-to-r from-purple-600 to-emerald-600 hover:from-purple-500 hover:to-emerald-500 text-white font-bold text-xs shadow-lg"
+              >
+                Done
+              </button>
             </motion.div>
           </motion.div>
         )}
